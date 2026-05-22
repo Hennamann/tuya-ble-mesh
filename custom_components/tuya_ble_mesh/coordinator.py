@@ -678,22 +678,13 @@ class TuyaBLEMeshCoordinator(DataUpdateCoordinator[None]):  # type: ignore[misc]
                     self._listener_error_counts.pop(cb_id, None)
 
     def _dispatch_update(self) -> None:
+        # DataUpdateCoordinator.async_set_updated_data is a regular method (not
+        # a coroutine) that updates state and fires listener callbacks. Wrapping
+        # it in async_create_background_task crashes with "a coroutine was
+        # expected, got None". call_soon_threadsafe is sufficient — it's already
+        # marshalling onto the loop.
         if self._hass is not None:
-            # PLAT-747: Use entry.async_create_background_task for tracked task lifecycle
-            if self._entry is not None:
-                self._hass.loop.call_soon_threadsafe(
-                    lambda: self._entry.async_create_background_task(
-                        self._hass,
-                        self.async_set_updated_data(None),
-                        "dispatch_update",
-                        eager_start=True,
-                    )
-                )
-            else:
-                # Fallback for standalone mode (no entry)
-                self._hass.loop.call_soon_threadsafe(
-                    lambda: self._hass.async_create_task(self.async_set_updated_data(None))
-                )
+            self._hass.loop.call_soon_threadsafe(self.async_set_updated_data, None)
         else:
             self._notify_listeners()
 
