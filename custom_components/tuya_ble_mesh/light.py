@@ -456,15 +456,18 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
             if rgb_color is not None:
                 await device.send_color(rgb_color[0], rgb_color[1], rgb_color[2])
                 await device.send_light_mode(1)
+                self.coordinator.set_light_state(is_on=True, mode=1, rgb=rgb_color)
                 _LOGGER.debug("Set RGB color: (%d,%d,%d)", *rgb_color)
                 if brightness is not None:
                     await device.send_color_brightness(brightness)
+                    self.coordinator.set_light_state(color_brightness=brightness)
                     _LOGGER.debug("Set color brightness: %d", brightness)
                 return
 
             if color_temp is not None:
                 if self.coordinator.state.mode == 1:
                     await device.send_light_mode(0)
+                    self.coordinator.set_light_state(mode=0)
                 device_temp = color_temp_to_device(color_temp)
                 await device.send_color_temp(device_temp)
                 _LOGGER.debug("Set color temp: HA %d mireds -> device %d", color_temp, device_temp)
@@ -472,16 +475,23 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
             if brightness is not None:
                 if self.coordinator.state.mode == 1:
                     await device.send_color_brightness(brightness)
+                    self.coordinator.set_light_state(
+                        is_on=True, color_brightness=brightness
+                    )
                     _LOGGER.debug("Set color brightness: %d", brightness)
                 else:
                     device_brightness = brightness_to_device(brightness)
                     await device.send_brightness(device_brightness)
+                    self.coordinator.set_light_state(
+                        is_on=True, brightness=device_brightness
+                    )
                     _LOGGER.debug(
                         "Set brightness: HA %d -> device %d", brightness, device_brightness
                     )
 
             if not has_target:
                 await device.send_power(True)
+                self.coordinator.set_light_state(is_on=True)
 
     def _cancel_pending_command(self) -> None:
         """Cancel any pending debounced command task."""
@@ -512,6 +522,7 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
             return
 
         await self.coordinator.device.send_power(False)
+        self.coordinator.set_light_state(is_on=False)
 
     def _cancel_transition(self) -> None:
         """Cancel any in-progress transition task."""

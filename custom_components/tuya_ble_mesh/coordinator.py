@@ -1060,6 +1060,37 @@ class TuyaBLEMeshCoordinator(DataUpdateCoordinator[None]):  # type: ignore[misc]
         self._state = replace(self._state, scene_id=scene_id)
         self._dispatch_update()
 
+    def set_light_state(
+        self,
+        *,
+        is_on: bool | None = None,
+        brightness: int | None = None,
+        color_brightness: int | None = None,
+        mode: int | None = None,
+        rgb: tuple[int, int, int] | None = None,
+    ) -> None:
+        """Optimistically update light state after a write.
+
+        Lets the entity reflect what the user just requested without waiting
+        for a status notification from the bulb. Real status frames (when
+        they arrive) will overwrite this through ``_on_vendor_update``.
+        """
+        updates: dict[str, Any] = {}
+        if is_on is not None:
+            updates["is_on"] = is_on
+        if brightness is not None:
+            updates["brightness"] = brightness
+        if color_brightness is not None:
+            updates["color_brightness"] = color_brightness
+        if mode is not None:
+            updates["mode"] = mode
+        if rgb is not None:
+            updates["red"], updates["green"], updates["blue"] = rgb
+        if not updates:
+            return
+        self._state = replace(self._state, **updates)
+        self._dispatch_update()
+
     def assume_state(self, desired: dict[str, Any], sent: dict[str, Any]) -> None:
         now = time.time()
         updates: dict[str, Any] = {

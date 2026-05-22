@@ -70,6 +70,7 @@ OP_GENERIC_ONOFF_SET = 0x8202
 OP_GENERIC_ONOFF_STATUS = 0x8204
 
 # --- Tuya Vendor Model (CID 0x07D0) ---
+TUYA_CID = 0x07D0
 TUYA_VENDOR_OPCODE = 0xCDD007
 TUYA_VENDOR_WRITE_ACK = 0xC9D007
 TUYA_VENDOR_WRITE_UNACK = 0xCAD007
@@ -215,6 +216,38 @@ def config_model_app_bind(element_addr: int, app_idx: int, model_id: int) -> byt
         raise ProtocolError(msg)
     return struct.pack(">H", OP_CONFIG_MODEL_APP_BIND) + struct.pack(
         "<HHH", element_addr, app_idx, model_id
+    )
+
+
+def config_model_app_bind_vendor(
+    element_addr: int, app_idx: int, cid: int, model_id: int
+) -> bytes:
+    """Config Model App Bind for a vendor model (opcode 0x803D).
+
+    Vendor models use a 4-byte model identifier: ``[cid 2B][model_id 2B]``
+    appended after the element and app indexes. Total access payload is
+    8 bytes, which requires segmented transport.
+
+    Args:
+        element_addr: Element unicast address.
+        app_idx: Application key index (0..0xFFF).
+        cid: Company identifier (e.g. ``0x07D0`` for Tuya).
+        model_id: Vendor-defined model identifier within the CID.
+    """
+    if not 0 <= element_addr <= 0xFFFF:
+        msg = f"element_addr must be 0..0xFFFF, got {element_addr}"
+        raise ProtocolError(msg)
+    if not 0 <= app_idx <= 0xFFF:
+        msg = f"app_idx must be 0..0xFFF, got {app_idx}"
+        raise ProtocolError(msg)
+    if not 0 <= cid <= 0xFFFF:
+        msg = f"cid must be 0..0xFFFF, got {cid}"
+        raise ProtocolError(msg)
+    if not 0 <= model_id <= 0xFFFF:
+        msg = f"model_id must be 0..0xFFFF, got {model_id}"
+        raise ProtocolError(msg)
+    return struct.pack(">H", OP_CONFIG_MODEL_APP_BIND) + struct.pack(
+        "<HHHH", element_addr, app_idx, cid, model_id
     )
 
 
