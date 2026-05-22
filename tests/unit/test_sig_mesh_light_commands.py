@@ -29,10 +29,14 @@ from tuya_ble_mesh.sig_mesh_protocol import (  # noqa: E402
     DP_TYPE_ENUM,
     DP_TYPE_STRING,
     DP_TYPE_VALUE,
+    OP_LIGHT_HSL_SET_UNACK,
+    OP_LIGHT_LIGHTNESS_SET_UNACK,
     TUYA_VENDOR_WRITE_UNACK,
     MeshKeys,
     TuyaVendorDP,
     encode_tuya_vendor_dp,
+    light_hsl_set_unack,
+    light_lightness_set_unack,
     make_tuya_vendor_dp_payload,
     parse_composition_elements,
     parse_tuya_vendor_frame,
@@ -153,82 +157,112 @@ def _captured_payload(call_args: tuple) -> bytes:
     return bytes(args[1] if len(args) >= 2 else kwargs["data"])
 
 
+class TestLightnessCodec:
+    def test_set_unack_max_value(self) -> None:
+        payload = light_lightness_set_unack(0xFFFF, 0)
+        # opcode 2B (big-endian) + lightness 2B (little-endian) + tid 1B
+        assert payload[:2] == bytes([0x82, OP_LIGHT_LIGHTNESS_SET_UNACK & 0xFF])
+        assert payload[2:4] == bytes([0xFF, 0xFF])
+        assert payload[4] == 0x00
+
+    def test_set_unack_rejects_out_of_range(self) -> None:
+        from tuya_ble_mesh.exceptions import ProtocolError
+
+        with pytest.raises(ProtocolError):
+            light_lightness_set_unack(70000, 0)
+
+
+class TestHSLCodec:
+    def test_set_unack_field_order(self) -> None:
+        # lightness=0x1234 hue=0x5678 sat=0x9ABC tid=0x42
+        payload = light_hsl_set_unack(0x1234, 0x5678, 0x9ABC, 0x42)
+        assert payload[:2] == bytes([0x82, OP_LIGHT_HSL_SET_UNACK & 0xFF])
+        # Little-endian: lightness, hue, saturation, then tid
+        assert payload[2:4] == bytes([0x34, 0x12])
+        assert payload[4:6] == bytes([0x78, 0x56])
+        assert payload[6:8] == bytes([0xBC, 0x9A])
+        assert payload[8] == 0x42
+
+
 class TestSendBrightness:
     @pytest.mark.asyncio
-    async def test_scales_1_to_10(self) -> None:
+    async def test_sends_lightness_set_unack(self) -> None:
+        """send_brightness should emit a Light Lightness Set Unacknowledged."""
         dev = _make_device()
-        await dev.send_brightness(1)
-        # Last 7 bytes of the access payload are the DP TLV:
-        # [opcode 3B][cmd 1B=0x01][len 1B=0x07][dp_id=28][type=0x02][len=4][value 4B BE]
-        # Wire format is wrapped — but we test through the parse path instead.
-        assert dev._client.write_gatt_char.called
+        captured: list[bytes] = []
 
-    @pytest.mark.asyncio
-    async def test_scales_100_to_1000(self) -> None:
-        """HA-side 100 should map to wire 1000 (max)."""
-        dev = _make_device()
-        # Patch _send_dp directly to inspect the DP that would be sent
-        captured: list[TuyaVendorDP] = []
+        async def fake_send(payload: bytes) -> None:
+            captured.append(payload)
 
-        async def fake_send(dp: TuyaVendorDP) -> None:
-            captured.append(dp)
-
-        dev._send_dp = fake_send  # type: ignore[method-assign]
+        dev.send_vendor_command = fake_send  # type: ignore[method-assign]
         await dev.send_brightness(100)
         assert len(captured) == 1
-        dp = captured[0]
-        assert dp.dp_id == 28
-        assert dp.dp_type == DP_TYPE_VALUE
-        assert int.from_bytes(dp.value, "big", signed=True) == 1000
+        # Opcode 0x824D big-endian at start
+        assert captured[0][:2] == bytes([0x82, 0x4D])
+        # Lightness little-endian at offset 2..4 should be ~ 0xFFFF (max)
+        lightness = int.from_bytes(captured[0][2:4], "little")
+        assert lightness == 0xFFFF
+
+    @pytest.mark.asyncio
+    async def test_scales_50_percent_to_half(self) -> None:
+        dev = _make_device()
+        captured: list[bytes] = []
+
+        async def fake_send(payload: bytes) -> None:
+            captured.append(payload)
+
+        dev.send_vendor_command = fake_send  # type: ignore[method-assign]
+        await dev.send_brightness(50)
+        lightness = int.from_bytes(captured[0][2:4], "little")
+        # 50/100 * 65535 ≈ 32768
+        assert 30000 < lightness < 35000
 
     @pytest.mark.asyncio
     async def test_clamps_negative_to_min(self) -> None:
         dev = _make_device()
-        captured: list[TuyaVendorDP] = []
+        captured: list[bytes] = []
 
-        async def fake_send(dp: TuyaVendorDP) -> None:
-            captured.append(dp)
+        async def fake_send(payload: bytes) -> None:
+            captured.append(payload)
 
-        dev._send_dp = fake_send  # type: ignore[method-assign]
+        dev.send_vendor_command = fake_send  # type: ignore[method-assign]
         await dev.send_brightness(-5)
-        assert int.from_bytes(captured[0].value, "big", signed=True) == 10
+        lightness = int.from_bytes(captured[0][2:4], "little")
+        # Clamps level to 1 → 1 * 65535 / 100 ≈ 655
+        assert lightness > 0
 
 
 class TestSendColor:
     @pytest.mark.asyncio
-    async def test_red_emits_mode_then_colour(self) -> None:
+    async def test_red_emits_hsl_set_unack(self) -> None:
+        """Sending pure red should produce a Light HSL Set Unacknowledged with
+        hue ≈ 0, saturation ≈ 0xFFFF, lightness ≈ 0xFFFF."""
         dev = _make_device()
-        captured: list[TuyaVendorDP] = []
+        captured: list[bytes] = []
 
-        async def fake_send(dp: TuyaVendorDP) -> None:
-            captured.append(dp)
+        async def fake_send(payload: bytes) -> None:
+            captured.append(payload)
 
-        dev._send_dp = fake_send  # type: ignore[method-assign]
+        dev.send_vendor_command = fake_send  # type: ignore[method-assign]
         await dev.send_color(255, 0, 0)
-        # First the work_mode switch to colour, then the colour string
-        assert len(captured) == 2
-        assert captured[0].dp_id == 21
-        assert captured[0].dp_type == DP_TYPE_ENUM
-        assert captured[0].value == b"\x01"
-        assert captured[1].dp_id == 30
-        assert captured[1].dp_type == DP_TYPE_STRING
-        # H=0, S=1000=0x03e8, V=1000=0x03e8 → "000003e803e8"
-        assert captured[1].value == b"000003e803e8"
+        assert len(captured) == 1
+        assert captured[0][:2] == bytes([0x82, 0x77])  # OP_LIGHT_HSL_SET_UNACK
+        lightness = int.from_bytes(captured[0][2:4], "little")
+        hue = int.from_bytes(captured[0][4:6], "little")
+        saturation = int.from_bytes(captured[0][6:8], "little")
+        assert hue < 200  # red ≈ 0°
+        assert saturation > 0xFFF0
+        assert lightness > 0xFFF0
 
 
 class TestSendLightMode:
     @pytest.mark.asyncio
-    async def test_white_mode(self) -> None:
+    async def test_is_noop(self) -> None:
+        """send_light_mode is implicit via HSL/Lightness writes; the method
+        should not call write_gatt_char."""
         dev = _make_device()
-        captured: list[TuyaVendorDP] = []
-
-        async def fake_send(dp: TuyaVendorDP) -> None:
-            captured.append(dp)
-
-        dev._send_dp = fake_send  # type: ignore[method-assign]
         await dev.send_light_mode(0)
-        assert captured[0].dp_id == 21
-        assert captured[0].value == b"\x00"
+        assert not dev._client.write_gatt_char.called
 
 
 class TestParseCompositionElements:
@@ -292,16 +326,26 @@ class TestParseCompositionElements:
         assert parse_composition_elements(raw) == []
 
 
-class TestNoopStubs:
+class TestSendColorTemp:
     @pytest.mark.asyncio
-    async def test_send_color_temp_is_silent_noop(self) -> None:
+    async def test_sends_ctl_set_unack(self) -> None:
+        """send_color_temp should emit a Light CTL Set Unacknowledged."""
         dev = _make_device()
-        # Should not call write_gatt_char and should not raise
-        await dev.send_color_temp(50)
-        assert not dev._client.write_gatt_char.called
+        captured: list[bytes] = []
 
+        async def fake_send(payload: bytes) -> None:
+            captured.append(payload)
+
+        dev.send_vendor_command = fake_send  # type: ignore[method-assign]
+        await dev.send_color_temp(370)  # warmest mireds
+        assert len(captured) == 1
+        # OP_LIGHT_CTL_SET_UNACK = 0x825F
+        assert captured[0][:2] == bytes([0x82, 0x5F])
+
+
+class TestSendScene:
     @pytest.mark.asyncio
-    async def test_send_scene_is_silent_noop(self) -> None:
+    async def test_is_noop(self) -> None:
         dev = _make_device()
         await dev.send_scene(1)
         assert not dev._client.write_gatt_char.called

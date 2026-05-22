@@ -35,9 +35,6 @@ from tuya_ble_mesh.sig_mesh_device_segments import (
     _OPCODE_MODEL_APP_STATUS,
 )
 from tuya_ble_mesh.sig_mesh_protocol import (
-    DP_ID_LIGHT_BRIGHTNESS,
-    DP_ID_LIGHT_COLOUR,
-    DP_ID_LIGHT_MODE,
     DP_TYPE_BOOL,
     DP_TYPE_ENUM,
     DP_TYPE_STRING,
@@ -52,6 +49,9 @@ from tuya_ble_mesh.sig_mesh_protocol import (
     config_model_app_bind_vendor,
     encrypt_network_pdu,
     generic_onoff_set,
+    light_ctl_set_unack,
+    light_hsl_set_unack,
+    light_lightness_set_unack,
     make_access_segmented,
     make_access_unsegmented,
     make_proxy_pdu,
@@ -244,40 +244,60 @@ class SIGMeshDeviceCommandsMixin:
         await self._send_dp(TuyaVendorDP(dp_id, DP_TYPE_STRING, value.encode("ascii")))
 
     async def send_brightness(self, level: int) -> None:
-        """Send brightness on a SIG Mesh Tuya light (DP 28).
+        """Send brightness via Light Lightness Set Unacknowledged.
 
         Accepts the same 1..100 scale used by ``MeshDevice.send_brightness``
-        so the HA light entity is range-compatible. Internally scaled to the
-        bulb's 10..1000 wire range.
+        so the HA light entity stays range-compatible. Internally scaled to
+        the standard SIG 0..65535 lightness range.
         """
         clamped = max(1, min(int(level), 100))
-        wire = max(10, min(1000, round(clamped * 10)))
-        await self.send_dp_value(DP_ID_LIGHT_BRIGHTNESS, wire)
+        wire = max(1, min(0xFFFF, round(clamped * 0xFFFF / 100)))
+        payload = light_lightness_set_unack(wire, self._tid)
+        self._tid = (self._tid + 1) & 0xFF
+        await self.send_vendor_command(payload)
 
     async def send_color_brightness(self, level: int) -> None:
-        """Send brightness in colour mode (same DP, scaled from 0..255)."""
+        """Send brightness on the colour-side scale (0..255) via Light Lightness."""
         clamped = max(0, min(int(level), 255))
-        wire = max(10, min(1000, round(clamped * 1000 / 255)))
-        await self.send_dp_value(DP_ID_LIGHT_BRIGHTNESS, wire)
+        wire = max(0, min(0xFFFF, round(clamped * 0xFFFF / 255)))
+        payload = light_lightness_set_unack(wire, self._tid)
+        self._tid = (self._tid + 1) & 0xFF
+        await self.send_vendor_command(payload)
 
     async def send_color(self, red: int, green: int, blue: int) -> None:
-        """Send RGB colour on a SIG Mesh Tuya light (DP 30, HSV string).
+        """Send RGB colour via Light HSL Set Unacknowledged.
 
-        Wire format is a 12-char ASCII hex string ``HHHHSSSSVVVV`` where
-        hue is 0..360, saturation 0..1000, value 0..1000, each big-endian
-        uint16. Mode is switched to colour (DP 21 = 1) first.
+        RGB is converted to HSV, then the H/S/V triple is mapped to the SIG
+        Mesh 16-bit HSL representation (H 0..65535 → 0..360°, S/L 0..65535).
         """
-        h, s, v = _rgb_to_tuya_hsv(red, green, blue)
-        await self.send_dp_enum(DP_ID_LIGHT_MODE, 1)  # SIG_LIGHT_MODE_COLOUR
-        await self.send_dp_string(DP_ID_LIGHT_COLOUR, f"{h:04x}{s:04x}{v:04x}")
+        h_deg, s_per_1000, v_per_1000 = _rgb_to_tuya_hsv(red, green, blue)
+        hue = max(0, min(0xFFFF, round(h_deg * 0xFFFF / 360)))
+        saturation = max(0, min(0xFFFF, round(s_per_1000 * 0xFFFF / 1000)))
+        lightness = max(0, min(0xFFFF, round(v_per_1000 * 0xFFFF / 1000)))
+        payload = light_hsl_set_unack(lightness, hue, saturation, self._tid)
+        self._tid = (self._tid + 1) & 0xFF
+        await self.send_vendor_command(payload)
 
     async def send_light_mode(self, mode: int) -> None:
-        """Switch work_mode (DP 21). 0=white, 1=colour."""
-        await self.send_dp_enum(DP_ID_LIGHT_MODE, int(mode) & 0xFF)
+        """Mode switching is implicit in SIG Mesh: writing HSL puts the bulb
+        in colour mode; writing Lightness puts it in white mode. No-op here,
+        kept so the HA light entity's call site is unconditional."""
+        _LOGGER.debug("send_light_mode(%d) ignored — implicit via Light HSL/Lightness", mode)
 
-    async def send_color_temp(self, _value: int) -> None:
-        """No-op stub: this Tuya light product has no temp_value DP."""
-        _LOGGER.debug("send_color_temp ignored: no CT DP on this SIG light")
+    async def send_color_temp(self, mireds: int) -> None:
+        """Send colour temperature via Light CTL Set Unacknowledged.
+
+        Input is in mireds (153..370). SIG CTL Temperature is in kelvin
+        encoded as 16-bit, range 0x0320..0x4E20 (800K..20000K).
+        """
+        clamped_mireds = max(1, int(mireds))
+        kelvin = round(1_000_000 / clamped_mireds)
+        ct_value = max(0x0320, min(0x4E20, kelvin))
+        # Lightness stays at the current value — we don't change brightness
+        # via a CT-only request, so send 0xFFFF as a "keep current" hint.
+        payload = light_ctl_set_unack(0xFFFF, ct_value, 0, self._tid)
+        self._tid = (self._tid + 1) & 0xFF
+        await self.send_vendor_command(payload)
 
     async def send_scene(self, _scene_id: int) -> None:
         """No-op stub: scene support not yet implemented for SIG lights."""
