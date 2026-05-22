@@ -34,6 +34,7 @@ from tuya_ble_mesh.sig_mesh_protocol import (  # noqa: E402
     TuyaVendorDP,
     encode_tuya_vendor_dp,
     make_tuya_vendor_dp_payload,
+    parse_composition_elements,
     parse_tuya_vendor_frame,
 )
 
@@ -228,6 +229,67 @@ class TestSendLightMode:
         await dev.send_light_mode(0)
         assert captured[0].dp_id == 21
         assert captured[0].value == b"\x00"
+
+
+class TestParseCompositionElements:
+    def test_single_element_with_sig_and_vendor(self) -> None:
+        # loc=0x0001, NumS=2, NumV=1, sig=[0x1000, 0x1001], vendor=[(0x07D0, 0xFE00)]
+        raw = bytes(
+            [
+                0x01,
+                0x00,  # loc 0x0001
+                0x02,  # NumS = 2
+                0x01,  # NumV = 1
+                0x00,
+                0x10,  # SIG model 0x1000
+                0x01,
+                0x10,  # SIG model 0x1001
+                0xD0,
+                0x07,  # CID 0x07D0
+                0x00,
+                0xFE,  # Model 0xFE00
+            ]
+        )
+        elems = parse_composition_elements(raw)
+        assert len(elems) == 1
+        assert elems[0].loc == 0x0001
+        assert elems[0].sig_model_ids == (0x1000, 0x1001)
+        assert elems[0].vendor_models == ((0x07D0, 0xFE00),)
+
+    def test_two_elements(self) -> None:
+        # elem0: loc=0, NumS=1, NumV=0, sig=[0x1000]
+        # elem1: loc=0, NumS=0, NumV=1, vendor=[(0x07D0, 0xFE01)]
+        raw = bytes(
+            [
+                0x00,
+                0x00,
+                0x01,
+                0x00,
+                0x00,
+                0x10,
+                0x00,
+                0x00,
+                0x00,
+                0x01,
+                0xD0,
+                0x07,
+                0x01,
+                0xFE,
+            ]
+        )
+        elems = parse_composition_elements(raw)
+        assert len(elems) == 2
+        assert elems[0].sig_model_ids == (0x1000,)
+        assert elems[1].vendor_models == ((0x07D0, 0xFE01),)
+
+    def test_empty(self) -> None:
+        assert parse_composition_elements(b"") == []
+
+    def test_truncated_returns_what_it_could_parse(self) -> None:
+        # Header claims 2 SIG models but buffer only has 1
+        raw = bytes([0x00, 0x00, 0x02, 0x00, 0x00, 0x10])
+        # Should stop after the header check without raising
+        assert parse_composition_elements(raw) == []
 
 
 class TestNoopStubs:

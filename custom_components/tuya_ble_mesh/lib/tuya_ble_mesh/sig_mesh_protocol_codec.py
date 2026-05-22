@@ -482,6 +482,54 @@ def parse_composition_data(params: bytes) -> CompositionData:
     )
 
 
+@dataclass(frozen=True)
+class ElementInfo:
+    """One element parsed from Composition Data Page 0.
+
+    Per Bluetooth Mesh Profile 4.2.1.4: each element advertises its location
+    descriptor plus the SIG and vendor model identifiers it implements.
+    """
+
+    loc: int
+    sig_model_ids: tuple[int, ...]
+    vendor_models: tuple[tuple[int, int], ...]  # list of (cid, model_id)
+
+
+def parse_composition_elements(raw_elements: bytes) -> list[ElementInfo]:
+    """Parse the element list inside Composition Data Page 0 raw_elements.
+
+    Each element header is 4 bytes (loc 2B, NumS 1B, NumV 1B), followed by
+    NumS * 2 bytes of SIG model IDs and NumV * 4 bytes of vendor model IDs
+    (each as cid 2B + model 2B, little-endian).
+
+    Returns an empty list rather than raising if the buffer is malformed —
+    the caller can still fall back to defaults.
+    """
+    elements: list[ElementInfo] = []
+    offset = 0
+    while offset + 4 <= len(raw_elements):
+        loc = struct.unpack_from("<H", raw_elements, offset)[0]
+        num_s = raw_elements[offset + 2]
+        num_v = raw_elements[offset + 3]
+        offset += 4
+        if offset + num_s * 2 + num_v * 4 > len(raw_elements):
+            break
+        sig_ids: list[int] = []
+        for _ in range(num_s):
+            sig_ids.append(struct.unpack_from("<H", raw_elements, offset)[0])
+            offset += 2
+        vendor_models: list[tuple[int, int]] = []
+        for _ in range(num_v):
+            cid = struct.unpack_from("<H", raw_elements, offset)[0]
+            model_id = struct.unpack_from("<H", raw_elements, offset + 2)[0]
+            vendor_models.append((cid, model_id))
+            offset += 4
+        elements.append(
+            ElementInfo(loc=loc, sig_model_ids=tuple(sig_ids), vendor_models=tuple(vendor_models))
+        )
+    return elements
+
+
 # ============================================================
 # Status Response Formatting
 # ============================================================

@@ -189,6 +189,7 @@ class SIGMeshDevice(SIGMeshDeviceCommandsMixin, SIGMeshDeviceSegmentsMixin):  # 
 
         # Composition Data and firmware version
         self._composition: CompositionData | None = None
+        self._composition_elements: list[Any] = []
         self._firmware_version: str | None = None
 
         # Segmented message reassembly buffers: (src, dst, seq_zero, aid) -> buffer
