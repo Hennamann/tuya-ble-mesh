@@ -20,6 +20,7 @@ CONF_DEVICE_TYPE = "device_type"
 DEVICE_TYPE_LIGHT = "light"
 DEVICE_TYPE_PLUG = "plug"
 DEVICE_TYPE_SIG_PLUG = "sig_plug"
+DEVICE_TYPE_SIG_LIGHT = "sig_light"
 CONF_MESH_NAME = "mesh_name"
 CONF_MESH_PASSWORD = "mesh_password"  # pragma: allowlist secret
 CONF_MAC_ADDRESS = "mac_address"
@@ -49,16 +50,34 @@ DEVICE_TYPE_SIG_BRIDGE_PLUG = "sig_bridge_plug"
 DEVICE_TYPE_TELINK_BRIDGE_LIGHT = "telink_bridge_light"
 
 PLUG_DEVICE_TYPES = {DEVICE_TYPE_PLUG, DEVICE_TYPE_SIG_PLUG, DEVICE_TYPE_SIG_BRIDGE_PLUG}
-LIGHT_DEVICE_TYPES = {DEVICE_TYPE_LIGHT, DEVICE_TYPE_TELINK_BRIDGE_LIGHT}
+LIGHT_DEVICE_TYPES = {DEVICE_TYPE_LIGHT, DEVICE_TYPE_TELINK_BRIDGE_LIGHT, DEVICE_TYPE_SIG_LIGHT}
+SIG_MESH_DEVICE_TYPES = {DEVICE_TYPE_SIG_PLUG, DEVICE_TYPE_SIG_LIGHT}
 
 # Human-readable model names shown in the HA device registry
 DEVICE_MODEL_NAMES: dict[str, str] = {
     DEVICE_TYPE_LIGHT: "LED Light",
     DEVICE_TYPE_PLUG: "Smart Plug",
     DEVICE_TYPE_SIG_PLUG: "Smart Plug",
+    DEVICE_TYPE_SIG_LIGHT: "LED Light (SIG Mesh)",
     DEVICE_TYPE_SIG_BRIDGE_PLUG: "Smart Plug (Bridge)",
     DEVICE_TYPE_TELINK_BRIDGE_LIGHT: "LED Light (Bridge)",
 }
+
+# Tuya standard category-dj (lighting) DP IDs — v2 function set.
+# Verify by inspecting your bulb's Function Definition in Tuya IoT if commands
+# do not take effect; some non-standard products remap these.
+DP_ID_LIGHT_SWITCH = 20       # switch_led — bool
+DP_ID_LIGHT_MODE = 21         # work_mode — enum (0=white, 1=colour, 2=scene, 3=music)
+DP_ID_LIGHT_BRIGHTNESS = 28   # bright_value_v2 — value (10..1000)
+DP_ID_LIGHT_COLOUR = 30       # colour_data_v2 — string "HHHHSSSSVVVV"
+
+# SIG Mesh light work_mode enum indexes
+SIG_LIGHT_MODE_WHITE = 0
+SIG_LIGHT_MODE_COLOUR = 1
+
+# SIG Mesh light brightness wire range (DP 28 v2)
+SIG_LIGHT_BRIGHTNESS_MIN = 10
+SIG_LIGHT_BRIGHTNESS_MAX = 1000
 
 # SIG Mesh service UUIDs (Bluetooth SIG assigned)
 SIG_MESH_PROV_UUID = "00001827-0000-1000-8000-00805f9b34fb"  # Provisioning Service

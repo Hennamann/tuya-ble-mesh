@@ -22,6 +22,7 @@ from custom_components.tuya_ble_mesh.const import (
     DEFAULT_BRIDGE_PORT,
     DEFAULT_IV_INDEX,
     DEVICE_TYPE_SIG_BRIDGE_PLUG,
+    DEVICE_TYPE_SIG_LIGHT,
     DEVICE_TYPE_SIG_PLUG,
 )
 
@@ -245,9 +246,16 @@ async def async_step_sig_plug(flow: Any, user_input: dict[str, Any] | None) -> F
         else:
             await flow.async_set_unique_id(mac)
             flow._abort_if_unique_id_configured()
+            target_type = (
+                flow._discovery_info.get("sig_target_type", DEVICE_TYPE_SIG_PLUG)
+                if flow._discovery_info
+                else DEVICE_TYPE_SIG_PLUG
+            )
+            if target_type not in (DEVICE_TYPE_SIG_PLUG, DEVICE_TYPE_SIG_LIGHT):
+                target_type = DEVICE_TYPE_SIG_PLUG
             return flow._finalize_entry(
                 mac=mac,
-                device_type=DEVICE_TYPE_SIG_PLUG,
+                device_type=target_type,
                 unicast_target=f"{_UNICAST_DEVICE_DEFAULT:04X}",
                 unicast_our=f"{_UNICAST_PROVISIONER:04X}",
                 iv_index=DEFAULT_IV_INDEX,

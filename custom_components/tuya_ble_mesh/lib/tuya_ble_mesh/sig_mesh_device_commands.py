@@ -35,7 +35,17 @@ from tuya_ble_mesh.sig_mesh_device_segments import (
     _OPCODE_MODEL_APP_STATUS,
 )
 from tuya_ble_mesh.sig_mesh_protocol import (
+    DP_ID_LIGHT_BRIGHTNESS,
+    DP_ID_LIGHT_COLOUR,
+    DP_ID_LIGHT_MODE,
+    DP_TYPE_BOOL,
+    DP_TYPE_ENUM,
+    DP_TYPE_STRING,
+    DP_TYPE_VALUE,
+    MAX_UNSEG_ACCESS_PAYLOAD,
     SEG_DATA_SIZE,
+    TUYA_VENDOR_WRITE_UNACK,
+    TuyaVendorDP,
     config_appkey_add,
     config_composition_get,
     config_model_app_bind,
@@ -44,6 +54,7 @@ from tuya_ble_mesh.sig_mesh_protocol import (
     make_access_segmented,
     make_access_unsegmented,
     make_proxy_pdu,
+    make_tuya_vendor_dp_payload,
 )
 
 if TYPE_CHECKING:
@@ -60,6 +71,30 @@ _DEFAULT_TTL = 5
 # BLE write retry backoff parameters
 _BLE_WRITE_RETRY_INITIAL_BACKOFF = 1.0
 _BLE_WRITE_RETRY_BACKOFF_MULTIPLIER = 2.0
+
+
+def _rgb_to_tuya_hsv(red: int, green: int, blue: int) -> tuple[int, int, int]:
+    """Convert 0..255 RGB to Tuya wire HSV (H 0..360, S 0..1000, V 0..1000)."""
+    r = max(0, min(int(red), 255)) / 255.0
+    g = max(0, min(int(green), 255)) / 255.0
+    b = max(0, min(int(blue), 255)) / 255.0
+    cmax = max(r, g, b)
+    cmin = min(r, g, b)
+    delta = cmax - cmin
+    if delta == 0:
+        hue = 0.0
+    elif cmax == r:
+        hue = 60.0 * (((g - b) / delta) % 6.0)
+    elif cmax == g:
+        hue = 60.0 * (((b - r) / delta) + 2.0)
+    else:
+        hue = 60.0 * (((r - g) / delta) + 4.0)
+    sat = 0.0 if cmax == 0 else delta / cmax
+    return (
+        max(0, min(360, round(hue))),
+        max(0, min(1000, round(sat * 1000))),
+        max(0, min(1000, round(cmax * 1000))),
+    )
 
 
 class SIGMeshDeviceCommandsMixin:
@@ -181,6 +216,72 @@ class SIGMeshDeviceCommandsMixin:
         msg = f"BLE write failed for {self._address} after {max_retries} attempts"
         raise MeshConnectionError(msg) from last_error
 
+    async def _send_dp(self, dp: TuyaVendorDP) -> None:
+        """Build a single-DP Tuya vendor frame and send it (WRITE_UNACK)."""
+        payload = make_tuya_vendor_dp_payload(TUYA_VENDOR_WRITE_UNACK, [dp])
+        await self.send_vendor_command(payload)
+
+    async def send_dp_bool(self, dp_id: int, value: bool) -> None:
+        """Send a Tuya bool DP."""
+        await self._send_dp(TuyaVendorDP(dp_id, DP_TYPE_BOOL, b"\x01" if value else b"\x00"))
+
+    async def send_dp_value(self, dp_id: int, value: int) -> None:
+        """Send a Tuya value DP (4-byte big-endian signed int)."""
+        await self._send_dp(
+            TuyaVendorDP(dp_id, DP_TYPE_VALUE, value.to_bytes(4, "big", signed=True))
+        )
+
+    async def send_dp_enum(self, dp_id: int, value: int) -> None:
+        """Send a Tuya enum DP (1-byte index)."""
+        if not 0 <= value <= 0xFF:
+            msg = f"enum value {value} out of range for DP {dp_id}"
+            raise SIGMeshError(msg)
+        await self._send_dp(TuyaVendorDP(dp_id, DP_TYPE_ENUM, bytes([value])))
+
+    async def send_dp_string(self, dp_id: int, value: str) -> None:
+        """Send a Tuya string DP."""
+        await self._send_dp(TuyaVendorDP(dp_id, DP_TYPE_STRING, value.encode("ascii")))
+
+    async def send_brightness(self, level: int) -> None:
+        """Send brightness on a SIG Mesh Tuya light (DP 28).
+
+        Accepts the same 1..100 scale used by ``MeshDevice.send_brightness``
+        so the HA light entity is range-compatible. Internally scaled to the
+        bulb's 10..1000 wire range.
+        """
+        clamped = max(1, min(int(level), 100))
+        wire = max(10, min(1000, round(clamped * 10)))
+        await self.send_dp_value(DP_ID_LIGHT_BRIGHTNESS, wire)
+
+    async def send_color_brightness(self, level: int) -> None:
+        """Send brightness in colour mode (same DP, scaled from 0..255)."""
+        clamped = max(0, min(int(level), 255))
+        wire = max(10, min(1000, round(clamped * 1000 / 255)))
+        await self.send_dp_value(DP_ID_LIGHT_BRIGHTNESS, wire)
+
+    async def send_color(self, red: int, green: int, blue: int) -> None:
+        """Send RGB colour on a SIG Mesh Tuya light (DP 30, HSV string).
+
+        Wire format is a 12-char ASCII hex string ``HHHHSSSSVVVV`` where
+        hue is 0..360, saturation 0..1000, value 0..1000, each big-endian
+        uint16. Mode is switched to colour (DP 21 = 1) first.
+        """
+        h, s, v = _rgb_to_tuya_hsv(red, green, blue)
+        await self.send_dp_enum(DP_ID_LIGHT_MODE, 1)  # SIG_LIGHT_MODE_COLOUR
+        await self.send_dp_string(DP_ID_LIGHT_COLOUR, f"{h:04x}{s:04x}{v:04x}")
+
+    async def send_light_mode(self, mode: int) -> None:
+        """Switch work_mode (DP 21). 0=white, 1=colour."""
+        await self.send_dp_enum(DP_ID_LIGHT_MODE, int(mode) & 0xFF)
+
+    async def send_color_temp(self, _value: int) -> None:
+        """No-op stub: this Tuya light product has no temp_value DP."""
+        _LOGGER.debug("send_color_temp ignored: no CT DP on this SIG light")
+
+    async def send_scene(self, _scene_id: int) -> None:
+        """No-op stub: scene support not yet implemented for SIG lights."""
+        _LOGGER.debug("send_scene ignored: not implemented for SIG light")
+
     async def send_vendor_command(self, access_payload: bytes) -> None:
         """Send a Tuya vendor model command (uses AppKey encryption).
 
@@ -199,6 +300,51 @@ class SIGMeshDeviceCommandsMixin:
         if app_key is None:
             msg = "No application key loaded"
             raise SIGMeshKeyError(msg)
+
+        # Payloads larger than the unsegmented limit require segmented transport.
+        # Tuya vendor WRITE_UNACK does not expect a status response, so we send
+        # each segment without registering a response future.
+        if len(access_payload) > MAX_UNSEG_ACCESS_PAYLOAD:
+            upper_len = len(access_payload) + 4  # + 4-byte MIC (szmic=0)
+            n_segs = (upper_len + SEG_DATA_SIZE - 1) // SEG_DATA_SIZE
+            seq_start = await self._next_seqs(n_segs)
+
+            segments = make_access_segmented(
+                app_key,
+                self._our_addr,
+                self._target_addr,
+                seq_start,
+                self._keys.iv_index,
+                access_payload,
+                akf=1,
+                aid=self._keys.aid,
+            )
+            for seg_seq, seg_transport_pdu in segments:
+                network_pdu = encrypt_network_pdu(
+                    self._keys.enc_key,
+                    self._keys.priv_key,
+                    self._keys.nid,
+                    ctl=0,
+                    ttl=_DEFAULT_TTL,
+                    seq=seg_seq,
+                    src=self._our_addr,
+                    dst=self._target_addr,
+                    transport_pdu=seg_transport_pdu,
+                    iv_index=self._keys.iv_index,
+                )
+                proxy_pdu = make_proxy_pdu(network_pdu)
+                await self._client.write_gatt_char(
+                    SIG_MESH_PROXY_DATA_IN, proxy_pdu, response=False
+                )
+            _LOGGER.info(
+                "Vendor command sent to 0x%04X (opcode=%s, seq_start=%d, %d bytes, %d segs)",
+                self._target_addr,
+                access_payload[:3].hex(),
+                seq_start,
+                len(access_payload),
+                len(segments),
+            )
+            return
 
         seq = await self._next_seq()
 

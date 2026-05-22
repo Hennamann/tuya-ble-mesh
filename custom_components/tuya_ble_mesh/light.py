@@ -30,6 +30,7 @@ from custom_components.tuya_ble_mesh.const import (
     DEVICE_BRIGHTNESS_MIN,
     DEVICE_COLOR_TEMP_MAX,
     DEVICE_COLOR_TEMP_MIN,
+    DEVICE_TYPE_SIG_LIGHT,
     HA_BRIGHTNESS_MAX,
     HA_BRIGHTNESS_MIN,
     HA_MIRED_MAX,
@@ -256,7 +257,10 @@ async def async_setup_entry(
     runtime_data = entry.runtime_data
     coordinator: TuyaBLEMeshCoordinator = runtime_data.coordinator
     device_info: DeviceInfo = runtime_data.device_info
-    async_add_entities([TuyaBLEMeshLight(coordinator, entry.entry_id, device_info)])
+    is_sig = entry.data.get(CONF_DEVICE_TYPE) == DEVICE_TYPE_SIG_LIGHT
+    async_add_entities(
+        [TuyaBLEMeshLight(coordinator, entry.entry_id, device_info, sig_mesh=is_sig)]
+    )
 
 
 class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
@@ -272,6 +276,8 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
         coordinator: TuyaBLEMeshCoordinator,
         entry_id: str,
         device_info: DeviceInfo | None = None,
+        *,
+        sig_mesh: bool = False,
     ) -> None:
         """Initialize the light entity.
 
@@ -279,11 +285,13 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
             coordinator: Coordinator managing the BLE mesh device state.
             entry_id: Config entry ID used to scope the unique entity ID.
             device_info: Device registry info for grouping entities under a device.
+            sig_mesh: True for a SIG Mesh Tuya light (RGB-only, no CT).
         """
         super().__init__(coordinator, entry_id, device_info)
         self._attr_unique_id = f"{coordinator.device.address}_light"
         self._transition_task: asyncio.Task[None] | None = None
         self._pending_command_task: asyncio.Task[None] | None = None
+        self._sig_mesh = sig_mesh
         # PLAT-756: Semaphore to serialize light transitions and prevent race conditions
         self._transition_lock = asyncio.Lock()
 
@@ -303,7 +311,9 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
 
     @property
     def color_temp_kelvin(self) -> int | None:
-        """Return the current color temperature in kelvin."""
+        """Return the current color temperature in kelvin (None on SIG RGB-only)."""
+        if self._sig_mesh:
+            return None
         if not self.coordinator.state.is_on:
             return None
         mired = color_temp_to_ha(self.coordinator.state.color_temp)
@@ -325,6 +335,8 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
     @property
     def color_mode(self) -> ColorMode:
         """Return the current color mode."""
+        if self._sig_mesh:
+            return ColorMode.RGB
         if self.coordinator.state.mode == 1:
             return ColorMode.RGB
         return ColorMode.COLOR_TEMP
@@ -332,6 +344,8 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
     @property
     def supported_color_modes(self) -> set[ColorMode]:
         """Return supported color modes."""
+        if self._sig_mesh:
+            return {ColorMode.RGB}
         return {ColorMode.COLOR_TEMP, ColorMode.RGB}
 
     @property
