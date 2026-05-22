@@ -369,7 +369,7 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
             Dict with brightness_mode ('rgb' or 'white') and device_brightness
             (raw device brightness value: 0-255 for RGB, 1-100 for white mode).
         """
-        state = self._coordinator.state
+        state = self.coordinator.state
         if state.mode == 1:
             return {
                 "brightness_mode": "rgb",
