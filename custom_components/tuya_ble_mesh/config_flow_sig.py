@@ -34,11 +34,9 @@ _UNICAST_DEVICE_DEFAULT = 0x00B0
 _MODEL_GENERIC_ONOFF_SERVER = 0x1000
 # Tuya BLE Mesh Company Identifier
 _TUYA_CID = 0x07D0
-# Tuya vendor model identifiers under CID 0x07D0. Different Tuya BLE Mesh
-# light products bind their DP traffic to one of these pairs (server +
-# client). We attempt all four during provisioning; the device returns
-# "Invalid Model" for any it does not have and we continue.
-_TUYA_VENDOR_MODELS_TO_BIND: tuple[int, ...] = (
+# Fallback Tuya vendor model identifiers (CID 0x07D0). Used only if
+# composition data was not received and we have to guess.
+_TUYA_VENDOR_MODELS_FALLBACK: tuple[int, ...] = (
     0xFE00,  # commonly Tuya vendor server (DP write — to device)
     0xFE01,  # commonly Tuya vendor client (DP status — from device)
     0xFD00,  # alternate server seen on some products
@@ -190,31 +188,71 @@ async def run_provision(hass: Any, mac: str) -> tuple[str, str, str]:
             )
 
         # Bind Tuya vendor models so the device acts on DP frames (brightness,
-        # colour, etc.) and emits status DPs back. The exact model id is not
-        # universally documented; we try the common server/client ids used by
-        # Tuya BLE Mesh light products and ignore failures so an unsupported
-        # combination does not break provisioning.
-        for vendor_model in _TUYA_VENDOR_MODELS_TO_BIND:
+        # colour, etc.) and emits status DPs back. Use the composition data
+        # the device reported on connect — that tells us exactly which vendor
+        # models exist on which elements. Falls back to a hard-coded guess
+        # list if composition data did not arrive.
+        # composition data was requested during device.connect() and arrives
+        # via callback; give it up to 2s to land.
+        for _ in range(20):
+            if getattr(device, "_composition_elements", None):
+                break
+            await asyncio.sleep(0.1)
+
+        elements_to_bind: list[tuple[int, int, int]] = []  # (element_addr, cid, model_id)
+        comp_elements = getattr(device, "_composition_elements", []) or []
+        if comp_elements:
+            for idx, elem in enumerate(comp_elements):
+                element_addr = _UNICAST_DEVICE_DEFAULT + idx
+                for cid, model_id in elem.vendor_models:
+                    elements_to_bind.append((element_addr, cid, model_id))
+            _LOGGER.warning(
+                "Discovered %d vendor model(s) across %d element(s) on %s; binding all",
+                len(elements_to_bind),
+                len(comp_elements),
+                mac,
+            )
+        else:
+            _LOGGER.warning(
+                "No composition data for %s — falling back to hard-coded Tuya "
+                "vendor model id guesses (0x07D0:0xFE00/FE01/FD00/FD01)",
+                mac,
+            )
+            for vm in _TUYA_VENDOR_MODELS_FALLBACK:
+                elements_to_bind.append((_UNICAST_DEVICE_DEFAULT, _TUYA_CID, vm))
+
+        bound_count = 0
+        for element_addr, cid, model_id in elements_to_bind:
             try:
                 await asyncio.sleep(0.3)
                 bound = await device.send_config_model_app_bind(
-                    _UNICAST_DEVICE_DEFAULT, 0, vendor_model, cid=_TUYA_CID
+                    element_addr, 0, model_id, cid=cid
                 )
-                _LOGGER.info(
-                    "Tuya vendor model bind for %s (cid=0x%04X model=0x%04X) -> %s",
+                _LOGGER.warning(
+                    "Vendor model bind on %s elem=0x%04X cid=0x%04X model=0x%04X -> %s",
                     mac,
-                    _TUYA_CID,
-                    vendor_model,
+                    element_addr,
+                    cid,
+                    model_id,
                     "ok" if bound else "non-success status",
                 )
+                if bound:
+                    bound_count += 1
             except Exception:
-                _LOGGER.debug(
-                    "Tuya vendor model bind raised for %s (cid=0x%04X model=0x%04X)",
+                _LOGGER.warning(
+                    "Vendor model bind raised on %s elem=0x%04X cid=0x%04X model=0x%04X",
                     mac,
-                    _TUYA_CID,
-                    vendor_model,
+                    element_addr,
+                    cid,
+                    model_id,
                     exc_info=True,
                 )
+        _LOGGER.warning(
+            "Vendor model binding done for %s: %d/%d succeeded",
+            mac,
+            bound_count,
+            len(elements_to_bind),
+        )
     except Exception:
         _LOGGER.warning(
             "Post-provisioning config failed for %s",

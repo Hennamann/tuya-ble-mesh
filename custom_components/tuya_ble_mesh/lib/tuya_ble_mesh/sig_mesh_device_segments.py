@@ -87,6 +87,7 @@ class SIGMeshDeviceSegmentsMixin:
     _composition_callbacks: list[Any]
     _disconnect_callbacks: list[Any]
     _composition: CompositionData | None
+    _composition_elements: list[Any]
     _firmware_version: str | None
 
     def _log_notify_exception(self, task: asyncio.Task[None]) -> None:
@@ -400,11 +401,28 @@ class SIGMeshDeviceSegmentsMixin:
         self._composition = comp
         self._firmware_version = f"CID:{comp.cid:04X} PID:{comp.pid:04X} VID:{comp.vid:04X}"
 
-        _LOGGER.info(
-            "Composition Data from device: %s (CRPL=%d, features=0x%04X)",
+        # WARNING-level so it shows in default HA log config — needed to
+        # diagnose vendor model binding for new Tuya BLE Mesh products.
+        from tuya_ble_mesh.sig_mesh_protocol_codec import parse_composition_elements
+
+        elements = parse_composition_elements(comp.raw_elements)
+        elem_summary: list[str] = []
+        for idx, elem in enumerate(elements):
+            sig_part = ",".join(f"0x{m:04X}" for m in elem.sig_model_ids) or "-"
+            vendor_part = (
+                ",".join(f"0x{c:04X}:0x{m:04X}" for c, m in elem.vendor_models) or "-"
+            )
+            elem_summary.append(
+                f"elem{idx}(loc=0x{elem.loc:04X} sig=[{sig_part}] vendor=[{vendor_part}])"
+            )
+        self._composition_elements = elements
+        _LOGGER.warning(
+            "Composition Data for %s: %s (CRPL=%d features=0x%04X) elements=%s",
+            self._address,
             self._firmware_version,
             comp.crpl,
             comp.features,
+            "; ".join(elem_summary) if elem_summary else "<none parsed>",
         )
 
         for callback in list(self._composition_callbacks):
