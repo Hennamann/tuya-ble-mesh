@@ -69,6 +69,31 @@ OP_GENERIC_ONOFF_GET = 0x8201
 OP_GENERIC_ONOFF_SET = 0x8202
 OP_GENERIC_ONOFF_STATUS = 0x8204
 
+# --- Light Lightness model opcodes (Mesh Model 6.3) ---
+OP_LIGHT_LIGHTNESS_GET = 0x824B
+OP_LIGHT_LIGHTNESS_SET = 0x824C
+OP_LIGHT_LIGHTNESS_SET_UNACK = 0x824D
+OP_LIGHT_LIGHTNESS_STATUS = 0x824E
+
+# --- Light CTL model opcodes (Mesh Model 6.4) ---
+OP_LIGHT_CTL_GET = 0x825D
+OP_LIGHT_CTL_SET = 0x825E
+OP_LIGHT_CTL_SET_UNACK = 0x825F
+OP_LIGHT_CTL_STATUS = 0x8260
+
+# --- Light HSL model opcodes (Mesh Model 6.5) ---
+OP_LIGHT_HSL_GET = 0x826D
+OP_LIGHT_HSL_SET = 0x8276
+OP_LIGHT_HSL_SET_UNACK = 0x8277
+OP_LIGHT_HSL_STATUS = 0x8278
+
+# --- SIG Mesh Light model IDs ---
+MODEL_GENERIC_ONOFF_SERVER = 0x1000
+MODEL_LIGHT_LIGHTNESS_SERVER = 0x1300
+MODEL_LIGHT_LIGHTNESS_SETUP_SERVER = 0x1301
+MODEL_LIGHT_CTL_SERVER = 0x1303
+MODEL_LIGHT_HSL_SERVER = 0x1307
+
 # --- Tuya Vendor Model (CID 0x07D0) ---
 TUYA_CID = 0x07D0
 TUYA_VENDOR_OPCODE = 0xCDD007
@@ -264,6 +289,110 @@ def generic_onoff_set(on: bool, tid: int = 0) -> bytes:
 def generic_onoff_get() -> bytes:
     """Generic OnOff Get (opcode 0x8201)."""
     return struct.pack(">H", OP_GENERIC_ONOFF_GET)
+
+
+# ============================================================
+# Light Lightness Model Messages (Mesh Model 6.3)
+# ============================================================
+
+
+def light_lightness_set_unack(lightness: int, tid: int = 0) -> bytes:
+    """Light Lightness Set Unacknowledged (opcode 0x824D).
+
+    Args:
+        lightness: 16-bit unsigned lightness value (0..65535).
+        tid: Transaction identifier.
+    """
+    if not 0 <= lightness <= 0xFFFF:
+        msg = f"lightness must be 0..65535, got {lightness}"
+        raise ProtocolError(msg)
+    return struct.pack(">H", OP_LIGHT_LIGHTNESS_SET_UNACK) + struct.pack(
+        "<HB", lightness, tid & 0xFF
+    )
+
+
+def light_lightness_set(lightness: int, tid: int = 0) -> bytes:
+    """Light Lightness Set (opcode 0x824C, acknowledged)."""
+    if not 0 <= lightness <= 0xFFFF:
+        msg = f"lightness must be 0..65535, got {lightness}"
+        raise ProtocolError(msg)
+    return struct.pack(">H", OP_LIGHT_LIGHTNESS_SET) + struct.pack(
+        "<HB", lightness, tid & 0xFF
+    )
+
+
+def light_lightness_get() -> bytes:
+    """Light Lightness Get (opcode 0x824B)."""
+    return struct.pack(">H", OP_LIGHT_LIGHTNESS_GET)
+
+
+# ============================================================
+# Light HSL Model Messages (Mesh Model 6.5)
+# ============================================================
+
+
+def light_hsl_set_unack(lightness: int, hue: int, saturation: int, tid: int = 0) -> bytes:
+    """Light HSL Set Unacknowledged (opcode 0x8277).
+
+    Args:
+        lightness: 16-bit HSL Lightness (0..65535).
+        hue: 16-bit HSL Hue (0..65535 → 0..360°).
+        saturation: 16-bit HSL Saturation (0..65535 → 0..100%).
+        tid: Transaction identifier.
+    """
+    for name, value in (("lightness", lightness), ("hue", hue), ("saturation", saturation)):
+        if not 0 <= value <= 0xFFFF:
+            msg = f"{name} must be 0..65535, got {value}"
+            raise ProtocolError(msg)
+    return struct.pack(">H", OP_LIGHT_HSL_SET_UNACK) + struct.pack(
+        "<HHHB", lightness, hue, saturation, tid & 0xFF
+    )
+
+
+def light_hsl_set(lightness: int, hue: int, saturation: int, tid: int = 0) -> bytes:
+    """Light HSL Set (opcode 0x8276, acknowledged)."""
+    for name, value in (("lightness", lightness), ("hue", hue), ("saturation", saturation)):
+        if not 0 <= value <= 0xFFFF:
+            msg = f"{name} must be 0..65535, got {value}"
+            raise ProtocolError(msg)
+    return struct.pack(">H", OP_LIGHT_HSL_SET) + struct.pack(
+        "<HHHB", lightness, hue, saturation, tid & 0xFF
+    )
+
+
+def light_hsl_get() -> bytes:
+    """Light HSL Get (opcode 0x826D)."""
+    return struct.pack(">H", OP_LIGHT_HSL_GET)
+
+
+# ============================================================
+# Light CTL Model Messages (Mesh Model 6.4)
+# ============================================================
+
+
+def light_ctl_set_unack(
+    lightness: int, temperature: int, delta_uv: int = 0, tid: int = 0
+) -> bytes:
+    """Light CTL Set Unacknowledged (opcode 0x825F).
+
+    Args:
+        lightness: 16-bit CTL Lightness (0..65535).
+        temperature: 16-bit CTL Temperature (0x0320..0x4E20 = 800K..20000K).
+        delta_uv: 16-bit signed Delta UV (default 0).
+        tid: Transaction identifier.
+    """
+    if not 0 <= lightness <= 0xFFFF:
+        msg = f"lightness must be 0..65535, got {lightness}"
+        raise ProtocolError(msg)
+    if not 0 <= temperature <= 0xFFFF:
+        msg = f"temperature must be 0..65535, got {temperature}"
+        raise ProtocolError(msg)
+    if not -0x8000 <= delta_uv <= 0x7FFF:
+        msg = f"delta_uv must be int16, got {delta_uv}"
+        raise ProtocolError(msg)
+    return struct.pack(">H", OP_LIGHT_CTL_SET_UNACK) + struct.pack(
+        "<HHhB", lightness, temperature, delta_uv, tid & 0xFF
+    )
 
 
 # ============================================================

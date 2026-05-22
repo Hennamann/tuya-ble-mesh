@@ -199,6 +199,34 @@ async def run_provision(hass: Any, mac: str) -> tuple[str, str, str]:
                 break
             await asyncio.sleep(0.1)
 
+        # Bind any SIG Light models the bulb advertises. These are the
+        # standard Bluetooth Mesh lighting models (Lightness / CTL / HSL)
+        # that this integration uses for brightness and colour.
+        sig_light_models_to_bind = (0x1300, 0x1303, 0x1307)
+        for idx, elem in enumerate(getattr(device, "_composition_elements", []) or []):
+            elem_addr = _UNICAST_DEVICE_DEFAULT + idx
+            for sig_model in elem.sig_model_ids:
+                if sig_model not in sig_light_models_to_bind:
+                    continue
+                try:
+                    await asyncio.sleep(0.3)
+                    ok = await device.send_config_model_app_bind(elem_addr, 0, sig_model)
+                    _LOGGER.warning(
+                        "SIG Light model bind on %s elem=0x%04X model=0x%04X -> %s",
+                        mac,
+                        elem_addr,
+                        sig_model,
+                        "ok" if ok else "non-success status",
+                    )
+                except Exception:
+                    _LOGGER.warning(
+                        "SIG Light model bind raised on %s elem=0x%04X model=0x%04X",
+                        mac,
+                        elem_addr,
+                        sig_model,
+                        exc_info=True,
+                    )
+
         elements_to_bind: list[tuple[int, int, int]] = []  # (element_addr, cid, model_id)
         comp_elements = getattr(device, "_composition_elements", []) or []
         if comp_elements:
