@@ -81,6 +81,20 @@ DP_ID_POWER_W = 18
 DP_ID_CURRENT_MA = 19
 DP_ID_VOLTAGE_V = 20
 
+# Tuya category-dj (lighting) DP IDs — v2 function set
+DP_ID_LIGHT_SWITCH = 20       # switch_led — bool
+DP_ID_LIGHT_MODE = 21         # work_mode — enum
+DP_ID_LIGHT_BRIGHTNESS = 28   # bright_value_v2 — value (10..1000)
+DP_ID_LIGHT_COLOUR = 30       # colour_data_v2 — string "HHHHSSSSVVVV"
+
+# Tuya DP type byte values (per Tuya standard)
+DP_TYPE_RAW = 0x00
+DP_TYPE_BOOL = 0x01
+DP_TYPE_VALUE = 0x02   # 4-byte big-endian signed int
+DP_TYPE_STRING = 0x03
+DP_TYPE_ENUM = 0x04    # 1-byte enum index
+DP_TYPE_BITMAP = 0x05
+
 # Internal alias used by segments module
 _OPCODE_COMPOSITION_STATUS = OP_CONFIG_COMPOSITION_STATUS
 
@@ -310,6 +324,70 @@ def tuya_vendor_timestamp_response() -> bytes:
 def parse_tuya_vendor_dps(params: bytes) -> list[TuyaVendorDP]:
     """Parse Tuya vendor DP values (raw TLV, no frame header)."""
     return _parse_dp_bytes(params)
+
+
+def encode_tuya_vendor_dp(dp_id: int, dp_type: int, value: bytes) -> bytes:
+    """Encode a single Tuya DP as ``[dp_id 1B][dp_type 1B][dp_len 1B][value]``.
+
+    Args:
+        dp_id: Tuya data point id (0..255).
+        dp_type: Tuya DP type byte (``DP_TYPE_BOOL``/``DP_TYPE_VALUE``/...).
+        value: Raw value bytes.
+
+    Returns:
+        Encoded TLV bytes.
+
+    Raises:
+        MalformedPacketError: If any field exceeds single-byte range.
+    """
+    if not 0 <= dp_id <= 0xFF:
+        msg = f"dp_id out of range: {dp_id}"
+        raise MalformedPacketError(msg)
+    if not 0 <= dp_type <= 0xFF:
+        msg = f"dp_type out of range: {dp_type}"
+        raise MalformedPacketError(msg)
+    if len(value) > 0xFF:
+        msg = f"DP value too long ({len(value)} bytes)"
+        raise MalformedPacketError(msg)
+    return bytes([dp_id, dp_type, len(value)]) + value
+
+
+def make_tuya_vendor_dp_payload(
+    opcode: int,
+    dps: list[TuyaVendorDP],
+) -> bytes:
+    """Build a full Tuya vendor access payload carrying one or more DPs.
+
+    Wire format::
+
+        [opcode 3B big-endian]
+        [TUYA_CMD_DP_DATA = 0x01][total_dp_bytes_len 1B]
+        [dp_id 1B][dp_type 1B][dp_len 1B][value]...
+
+    Args:
+        opcode: Vendor opcode (``TUYA_VENDOR_WRITE_UNACK`` or
+            ``TUYA_VENDOR_WRITE_ACK``).
+        dps: One or more DPs to include.
+
+    Returns:
+        Bytes suitable to pass to ``SIGMeshDevice.send_vendor_command``.
+
+    Raises:
+        MalformedPacketError: If the encoded DP block exceeds 0xFF bytes
+            (unsegmented payload limit) or no DPs are supplied.
+    """
+    if not dps:
+        msg = "make_tuya_vendor_dp_payload requires at least one DP"
+        raise MalformedPacketError(msg)
+
+    dp_bytes = b"".join(encode_tuya_vendor_dp(d.dp_id, d.dp_type, d.value) for d in dps)
+    if len(dp_bytes) > 0xFF:
+        msg = f"Total DP block exceeds 255 bytes ({len(dp_bytes)})"
+        raise MalformedPacketError(msg)
+
+    opcode_bytes = opcode.to_bytes(3, "big")
+    frame = bytes([TUYA_CMD_DP_DATA, len(dp_bytes)]) + dp_bytes
+    return opcode_bytes + frame
 
 
 def _parse_dp_bytes(data: bytes) -> list[TuyaVendorDP]:

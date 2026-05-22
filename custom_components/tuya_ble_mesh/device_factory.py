@@ -27,6 +27,7 @@ from custom_components.tuya_ble_mesh.const import (
     DEFAULT_MESH_ADDRESS,
     DEFAULT_VENDOR_ID,
     DEVICE_TYPE_SIG_BRIDGE_PLUG,
+    DEVICE_TYPE_SIG_LIGHT,
     DEVICE_TYPE_SIG_PLUG,
     DEVICE_TYPE_TELINK_BRIDGE_LIGHT,
 )
@@ -194,6 +195,7 @@ _DEVICE_CREATORS: dict[
     DEVICE_TYPE_SIG_BRIDGE_PLUG: _create_sig_bridge_plug,
     DEVICE_TYPE_TELINK_BRIDGE_LIGHT: _create_telink_bridge_light,
     DEVICE_TYPE_SIG_PLUG: _create_sig_plug,
+    DEVICE_TYPE_SIG_LIGHT: _create_sig_plug,
 }
 
 

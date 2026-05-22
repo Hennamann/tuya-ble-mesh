@@ -60,6 +60,33 @@ _RSSI_STABILITY_THRESHOLD: int = 3
 _COMMAND_CONCURRENCY_LIMIT: int = 5
 
 
+def _hsv_to_rgb(h: int, s: int, v: int) -> tuple[int, int, int]:
+    """Convert Tuya wire HSV (H 0..360, S 0..1000, V 0..1000) to 0..255 RGB."""
+    hue = max(0, min(360, h)) / 60.0
+    sat = max(0, min(1000, s)) / 1000.0
+    val = max(0, min(1000, v)) / 1000.0
+    c = val * sat
+    x = c * (1.0 - abs((hue % 2.0) - 1.0))
+    m = val - c
+    if hue < 1.0:
+        rp, gp, bp = c, x, 0.0
+    elif hue < 2.0:
+        rp, gp, bp = x, c, 0.0
+    elif hue < 3.0:
+        rp, gp, bp = 0.0, c, x
+    elif hue < 4.0:
+        rp, gp, bp = 0.0, x, c
+    elif hue < 5.0:
+        rp, gp, bp = x, 0.0, c
+    else:
+        rp, gp, bp = c, 0.0, x
+    return (
+        max(0, min(255, round((rp + m) * 255))),
+        max(0, min(255, round((gp + m) * 255))),
+        max(0, min(255, round((bp + m) * 255))),
+    )
+
+
 class StateUpdateSource(StrEnum):
     """Source of a device state update for confidence tracking."""
 
@@ -780,6 +807,10 @@ class TuyaBLEMeshCoordinator(DataUpdateCoordinator[None]):  # type: ignore[misc]
     def _on_vendor_update(self, opcode: int, params: bytes) -> None:
         from tuya_ble_mesh.sig_mesh_protocol import (
             DP_ID_ENERGY_KWH,
+            DP_ID_LIGHT_BRIGHTNESS,
+            DP_ID_LIGHT_COLOUR,
+            DP_ID_LIGHT_MODE,
+            DP_ID_LIGHT_SWITCH,
             DP_ID_POWER_W,
             TUYA_CMD_TIMESTAMP_SYNC,
             TUYA_VENDOR_OPCODE,
@@ -793,7 +824,12 @@ class TuyaBLEMeshCoordinator(DataUpdateCoordinator[None]):  # type: ignore[misc]
             _LOGGER.info("Device requested timestamp sync — sending response")
             self._create_background_task(self._send_timestamp_response(), "timestamp_sync_response")
             return
-        power_w, energy_kwh, updated = self._state.power_w, self._state.energy_kwh, False
+
+        s = self._state
+        power_w, energy_kwh = s.power_w, s.energy_kwh
+        is_on, brightness, mode = s.is_on, s.brightness, s.mode
+        red, green, blue, color_brightness = s.red, s.green, s.blue, s.color_brightness
+        updated = False
         for dp in frame.dps:
             if dp.dp_id == DP_ID_POWER_W and len(dp.value) >= 1:
                 power_w = int.from_bytes(dp.value, "big") / 10.0
@@ -801,6 +837,33 @@ class TuyaBLEMeshCoordinator(DataUpdateCoordinator[None]):  # type: ignore[misc]
             elif dp.dp_id == DP_ID_ENERGY_KWH and len(dp.value) >= 1:
                 energy_kwh = int.from_bytes(dp.value, "big") / 100.0
                 updated = True
+            elif dp.dp_id == DP_ID_LIGHT_SWITCH and len(dp.value) >= 1:
+                is_on = dp.value[0] != 0
+                updated = True
+            elif dp.dp_id == DP_ID_LIGHT_MODE and len(dp.value) >= 1:
+                # 0=white, 1=colour, 2=scene, 3=music — collapse to white/colour for HA
+                mode = 1 if dp.value[0] == 1 else 0
+                updated = True
+            elif dp.dp_id == DP_ID_LIGHT_BRIGHTNESS and len(dp.value) >= 1:
+                wire = int.from_bytes(dp.value, "big", signed=True)
+                # Wire is 10..1000 — collapse to entity-side range:
+                # white mode → 1..100, colour mode → 0..255
+                if mode == 1:
+                    color_brightness = max(0, min(255, round(wire * 255 / 1000)))
+                else:
+                    brightness = max(1, min(100, round(wire / 10)))
+                updated = True
+            elif dp.dp_id == DP_ID_LIGHT_COLOUR and len(dp.value) >= 12:
+                try:
+                    hs = dp.value[:12].decode("ascii")
+                    h = int(hs[0:4], 16)
+                    sat = int(hs[4:8], 16)
+                    val = int(hs[8:12], 16)
+                except (UnicodeDecodeError, ValueError):
+                    _LOGGER.debug("Invalid colour_data_v2 payload")
+                else:
+                    red, green, blue = _hsv_to_rgb(h, sat, val)
+                    updated = True
         if updated:
             now = time.time()
             cd = dict(self._state.last_confirmed_state)
@@ -810,6 +873,13 @@ class TuyaBLEMeshCoordinator(DataUpdateCoordinator[None]):  # type: ignore[misc]
                 cd["energy_kwh"] = energy_kwh
             self._state = replace(
                 self._state,
+                is_on=is_on,
+                brightness=brightness,
+                mode=mode,
+                red=red,
+                green=green,
+                blue=blue,
+                color_brightness=color_brightness,
                 power_w=power_w,
                 energy_kwh=energy_kwh,
                 available=True,
