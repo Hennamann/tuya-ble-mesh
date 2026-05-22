@@ -49,6 +49,7 @@ from tuya_ble_mesh.sig_mesh_protocol import (
     config_appkey_add,
     config_composition_get,
     config_model_app_bind,
+    config_model_app_bind_vendor,
     encrypt_network_pdu,
     generic_onoff_set,
     make_access_segmented,
@@ -533,6 +534,7 @@ class SIGMeshDeviceCommandsMixin:
         app_idx: int,
         model_id: int,
         *,
+        cid: int | None = None,
         response_timeout: float = SIG_MESH_ONOFF_RESPONSE_TIMEOUT,
     ) -> bool:
         """Send Config Model App Bind and wait for Status.
@@ -542,7 +544,11 @@ class SIGMeshDeviceCommandsMixin:
         Args:
             element_addr: Element unicast address.
             app_idx: Application key index to bind.
-            model_id: SIG Model ID (e.g. 0x1000 for GenericOnOff Server).
+            model_id: Model ID. With cid=None this is a 16-bit SIG model id
+                (e.g. 0x1000 for GenericOnOff Server). With cid set this is
+                the 16-bit vendor model id within that company.
+            cid: Optional company id for a vendor model bind (e.g. 0x07D0
+                for Tuya). When None, a SIG model bind is sent.
             response_timeout: Seconds to wait for Model App Status response.
 
         Returns:
@@ -555,7 +561,10 @@ class SIGMeshDeviceCommandsMixin:
             msg = "Not connected"
             raise SIGMeshError(msg)
 
-        access_payload = config_model_app_bind(element_addr, app_idx, model_id)
+        if cid is None:
+            access_payload = config_model_app_bind(element_addr, app_idx, model_id)
+        else:
+            access_payload = config_model_app_bind_vendor(element_addr, app_idx, cid, model_id)
         seq = await self._next_seq()
 
         transport_pdu = make_access_unsegmented(
@@ -594,10 +603,10 @@ class SIGMeshDeviceCommandsMixin:
         try:
             await self._client.write_gatt_char(SIG_MESH_PROXY_DATA_IN, proxy_pdu, response=False)
             _LOGGER.info(
-                "Model App Bind sent: element=0x%04X app_idx=%d model=0x%04X (seq=%d)",
+                "Model App Bind sent: element=0x%04X app_idx=%d model=%s (seq=%d)",
                 element_addr,
                 app_idx,
-                model_id,
+                f"vendor 0x{cid:04X}:0x{model_id:04X}" if cid is not None else f"0x{model_id:04X}",
                 seq,
             )
 

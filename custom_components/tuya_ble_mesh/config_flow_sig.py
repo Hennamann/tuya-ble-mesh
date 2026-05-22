@@ -32,6 +32,18 @@ _UNICAST_PROVISIONER = 0x0001
 _UNICAST_DEVICE_DEFAULT = 0x00B0
 # GenericOnOff Server SIG Model ID
 _MODEL_GENERIC_ONOFF_SERVER = 0x1000
+# Tuya BLE Mesh Company Identifier
+_TUYA_CID = 0x07D0
+# Tuya vendor model identifiers under CID 0x07D0. Different Tuya BLE Mesh
+# light products bind their DP traffic to one of these pairs (server +
+# client). We attempt all four during provisioning; the device returns
+# "Invalid Model" for any it does not have and we continue.
+_TUYA_VENDOR_MODELS_TO_BIND: tuple[int, ...] = (
+    0xFE00,  # commonly Tuya vendor server (DP write — to device)
+    0xFE01,  # commonly Tuya vendor client (DP status — from device)
+    0xFD00,  # alternate server seen on some products
+    0xFD01,  # alternate client seen on some products
+)
 # Seconds to wait for device to reboot as Proxy Service after provisioning
 _POST_PROV_REBOOT_DELAY = 6.0
 
@@ -176,6 +188,33 @@ async def run_provision(hass: Any, mac: str) -> tuple[str, str, str]:
                 mac,
                 _MODEL_GENERIC_ONOFF_SERVER,
             )
+
+        # Bind Tuya vendor models so the device acts on DP frames (brightness,
+        # colour, etc.) and emits status DPs back. The exact model id is not
+        # universally documented; we try the common server/client ids used by
+        # Tuya BLE Mesh light products and ignore failures so an unsupported
+        # combination does not break provisioning.
+        for vendor_model in _TUYA_VENDOR_MODELS_TO_BIND:
+            try:
+                await asyncio.sleep(0.3)
+                bound = await device.send_config_model_app_bind(
+                    _UNICAST_DEVICE_DEFAULT, 0, vendor_model, cid=_TUYA_CID
+                )
+                _LOGGER.info(
+                    "Tuya vendor model bind for %s (cid=0x%04X model=0x%04X) -> %s",
+                    mac,
+                    _TUYA_CID,
+                    vendor_model,
+                    "ok" if bound else "non-success status",
+                )
+            except Exception:
+                _LOGGER.debug(
+                    "Tuya vendor model bind raised for %s (cid=0x%04X model=0x%04X)",
+                    mac,
+                    _TUYA_CID,
+                    vendor_model,
+                    exc_info=True,
+                )
     except Exception:
         _LOGGER.warning(
             "Post-provisioning config failed for %s",
