@@ -163,7 +163,7 @@ async def run_provision(hass: Any, mac: str) -> tuple[str, str, str]:
     )
     try:
         await device.connect(timeout=20.0, max_retries=5)
-        key_add_ok = await device.send_config_app_key_add(app_key)
+        key_add_ok = await device.send_config_appkey_add(app_key)
         if not key_add_ok:
             _LOGGER.warning("Application key add returned non-success for %s", mac)
         await asyncio.sleep(0.5)

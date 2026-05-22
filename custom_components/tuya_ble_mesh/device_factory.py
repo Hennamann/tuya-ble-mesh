@@ -142,6 +142,9 @@ def _create_sig_plug(
         f"{op_prefix}-app-key/password": app_key,
     }
 
+    # SIGMeshDevice doesn't currently accept ble_connect_callback. The kwarg
+    # is reserved for future use; for now we drop it.
+    _ = ble_connect_callback
     return SIGMeshDevice(
         mac_address,
         target_addr,
@@ -150,7 +153,6 @@ def _create_sig_plug(
         op_item_prefix=op_prefix,
         iv_index=iv_index,
         ble_device_callback=ble_device_callback,
-        ble_connect_callback=ble_connect_callback,
     )
 
 
