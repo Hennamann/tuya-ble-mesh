@@ -234,8 +234,8 @@ class TestSendBrightness:
 
 class TestSendColor:
     @pytest.mark.asyncio
-    async def test_red_emits_sig_hsl_trio(self) -> None:
-        """send_color emits SIG Light HSL Hue Set, Saturation Set, then combined HSL Set."""
+    async def test_red_emits_hsl_set_with_correct_lightness(self) -> None:
+        """For pure red the HSL Set should carry L=0x8000 (50%), not 0xFFFF."""
         dev = _make_device()
         captured: list[bytes] = []
 
@@ -244,11 +244,32 @@ class TestSendColor:
 
         dev.send_vendor_command = fake_send  # type: ignore[method-assign]
         await dev.send_color(255, 0, 0)
-        # 3 SIG HSL messages: Hue Set Unack, Saturation Set Unack, combined HSL Set Unack
-        assert len(captured) == 3
-        assert captured[0][:2] == bytes([0x82, 0x70])
-        assert captured[1][:2] == bytes([0x82, 0x74])
-        assert captured[2][:2] == bytes([0x82, 0x77])
+        assert len(captured) == 1
+        assert captured[0][:2] == bytes([0x82, 0x77])  # OP_LIGHT_HSL_SET_UNACK
+        # Wire order: [opcode 2B BE][lightness 2B LE][hue 2B LE][saturation 2B LE][tid 1B]
+        lightness = int.from_bytes(captured[0][2:4], "little")
+        hue = int.from_bytes(captured[0][4:6], "little")
+        sat = int.from_bytes(captured[0][6:8], "little")
+        # L = V·(1 - S/2) = 1·(1 - 0.5) = 0.5 → 0x8000
+        assert 0x7F00 <= lightness <= 0x80FF, f"L should be ~0x8000, got 0x{lightness:04X}"
+        assert hue < 200  # H≈0 for red
+        assert sat > 0xFFF0  # full saturation
+
+    @pytest.mark.asyncio
+    async def test_white_has_full_lightness_zero_saturation(self) -> None:
+        """RGB white should map to L=0xFFFF S=0 — the SIG HSL definition of white."""
+        dev = _make_device()
+        captured: list[bytes] = []
+
+        async def fake_send(payload: bytes) -> None:
+            captured.append(payload)
+
+        dev.send_vendor_command = fake_send  # type: ignore[method-assign]
+        await dev.send_color(255, 255, 255)
+        lightness = int.from_bytes(captured[0][2:4], "little")
+        sat = int.from_bytes(captured[0][6:8], "little")
+        assert lightness > 0xFFF0
+        assert sat < 16
 
 
 class TestSendLightMode:
