@@ -35,14 +35,8 @@ from tuya_ble_mesh.sig_mesh_device_segments import (
     _OPCODE_MODEL_APP_STATUS,
 )
 from tuya_ble_mesh.sig_mesh_protocol import (
-    DP_TYPE_BOOL,
-    DP_TYPE_ENUM,
-    DP_TYPE_STRING,
-    DP_TYPE_VALUE,
     MAX_UNSEG_ACCESS_PAYLOAD,
     SEG_DATA_SIZE,
-    TUYA_VENDOR_WRITE_UNACK,
-    TuyaVendorDP,
     config_appkey_add,
     config_composition_get,
     config_model_app_bind,
@@ -57,7 +51,6 @@ from tuya_ble_mesh.sig_mesh_protocol import (
     make_access_segmented,
     make_access_unsegmented,
     make_proxy_pdu,
-    make_tuya_vendor_dp_payload,
 )
 
 if TYPE_CHECKING:
@@ -74,15 +67,6 @@ _DEFAULT_TTL = 5
 # BLE write retry backoff parameters
 _BLE_WRITE_RETRY_INITIAL_BACKOFF = 1.0
 _BLE_WRITE_RETRY_BACKOFF_MULTIPLIER = 2.0
-
-# Tuya BLE Mesh DP ids for dj-category lights (work_mode + colour_data).
-# Different products may use other ids; tweak here if a future device needs
-# a different mapping.
-_DP_ID_SWITCH_LED = 1
-_DP_ID_WORK_MODE = 2
-_DP_ID_BRIGHTNESS = 3
-_DP_ID_COLOUR = 5
-
 
 def _rgb_to_tuya_hsv(red: int, green: int, blue: int) -> tuple[int, int, int]:
     """Convert 0..255 RGB to Tuya wire HSV (H 0..360, S 0..1000, V 0..1000)."""
@@ -227,32 +211,6 @@ class SIGMeshDeviceCommandsMixin:
         msg = f"BLE write failed for {self._address} after {max_retries} attempts"
         raise MeshConnectionError(msg) from last_error
 
-    async def _send_dp(self, dp: TuyaVendorDP) -> None:
-        """Build a single-DP Tuya vendor frame and send it (WRITE_UNACK)."""
-        payload = make_tuya_vendor_dp_payload(TUYA_VENDOR_WRITE_UNACK, [dp])
-        await self.send_vendor_command(payload)
-
-    async def send_dp_bool(self, dp_id: int, value: bool) -> None:
-        """Send a Tuya bool DP."""
-        await self._send_dp(TuyaVendorDP(dp_id, DP_TYPE_BOOL, b"\x01" if value else b"\x00"))
-
-    async def send_dp_value(self, dp_id: int, value: int) -> None:
-        """Send a Tuya value DP (4-byte big-endian signed int)."""
-        await self._send_dp(
-            TuyaVendorDP(dp_id, DP_TYPE_VALUE, value.to_bytes(4, "big", signed=True))
-        )
-
-    async def send_dp_enum(self, dp_id: int, value: int) -> None:
-        """Send a Tuya enum DP (1-byte index)."""
-        if not 0 <= value <= 0xFF:
-            msg = f"enum value {value} out of range for DP {dp_id}"
-            raise SIGMeshError(msg)
-        await self._send_dp(TuyaVendorDP(dp_id, DP_TYPE_ENUM, bytes([value])))
-
-    async def send_dp_string(self, dp_id: int, value: str) -> None:
-        """Send a Tuya string DP."""
-        await self._send_dp(TuyaVendorDP(dp_id, DP_TYPE_STRING, value.encode("ascii")))
-
     async def send_brightness(self, level: int) -> None:
         """Send brightness via Light Lightness Set Unacknowledged.
 
@@ -304,15 +262,11 @@ class SIGMeshDeviceCommandsMixin:
         saturation = max(0, min(0xFFFF, round(s_per_1000 * 0xFFFF / 1000)))
         lightness = max(0, min(0xFFFF, round(v_per_1000 * 0xFFFF / 1000)))
 
-        _LOGGER.warning(
-            "send_color RGB=(%d,%d,%d) -> H=%d° S=%d/1000 V=%d/1000 "
-            "(SIG H=0x%04X S=0x%04X L=0x%04X)",
+        _LOGGER.debug(
+            "send_color RGB=(%d,%d,%d) -> SIG HSL H=0x%04X S=0x%04X L=0x%04X",
             red,
             green,
             blue,
-            h_deg,
-            s_per_1000,
-            v_per_1000,
             hue,
             saturation,
             lightness,
