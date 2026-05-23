@@ -1068,6 +1068,7 @@ class TuyaBLEMeshCoordinator(DataUpdateCoordinator[None]):  # type: ignore[misc]
         color_brightness: int | None = None,
         mode: int | None = None,
         rgb: tuple[int, int, int] | None = None,
+        color_temp: int | None = None,
     ) -> None:
         """Optimistically update light state after a write.
 
@@ -1086,6 +1087,8 @@ class TuyaBLEMeshCoordinator(DataUpdateCoordinator[None]):  # type: ignore[misc]
             updates["mode"] = mode
         if rgb is not None:
             updates["red"], updates["green"], updates["blue"] = rgb
+        if color_temp is not None:
+            updates["color_temp"] = color_temp
         if not updates:
             return
         self._state = replace(self._state, **updates)
