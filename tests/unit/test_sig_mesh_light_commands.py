@@ -244,16 +244,11 @@ class TestSendColor:
 
         dev.send_vendor_command = fake_send  # type: ignore[method-assign]
         await dev.send_color(255, 0, 0)
-        assert len(captured) == 6
-        # 1. Tuya work_mode = colour
-        assert captured[0][:3] == bytes([0xCA, 0xD0, 0x07])  # Tuya vendor opcode
-        # 2-4. SIG HSL trio
-        assert captured[1][:2] == bytes([0x82, 0x70])  # Hue Set Unack
-        assert captured[2][:2] == bytes([0x82, 0x74])  # Saturation Set Unack
-        assert captured[3][:2] == bytes([0x82, 0x77])  # combined HSL Set Unack
-        # 5-6. Tuya colour_data DP in RAW and STRING forms
-        assert captured[4][:3] == bytes([0xCA, 0xD0, 0x07])
-        assert captured[5][:3] == bytes([0xCA, 0xD0, 0x07])
+        # 5 Tuya DP writes: switch_led, work_mode×2 (enum+string), colour_data×2
+        assert len(captured) == 5
+        # All five carry the Tuya vendor WRITE_UNACK opcode 0xCAD007
+        for tuya_msg in captured:
+            assert tuya_msg[:3] == bytes([0xCA, 0xD0, 0x07])
 
 
 class TestSendLightMode:
