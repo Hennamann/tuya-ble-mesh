@@ -45,6 +45,8 @@ _REASSEMBLY_TIMEOUT = 10.0
 
 # Opcodes for status responses
 _OPCODE_ONOFF_STATUS = 0x8204
+_OPCODE_LIGHT_LIGHTNESS_STATUS = 0x824E
+_OPCODE_LIGHT_HSL_STATUS = 0x8278
 _OPCODE_APPKEY_STATUS = 0x8003
 _OPCODE_MODEL_APP_STATUS = 0x803E
 
@@ -86,6 +88,8 @@ class SIGMeshDeviceSegmentsMixin:
     _vendor_callbacks: list[Any]
     _composition_callbacks: list[Any]
     _disconnect_callbacks: list[Any]
+    _lightness_callbacks: list[Any]
+    _hsl_callbacks: list[Any]
     _composition: CompositionData | None
     _composition_elements: list[Any]
     _firmware_version: str | None
@@ -358,6 +362,52 @@ class SIGMeshDeviceSegmentsMixin:
                     raise
                 except Exception:
                     _LOGGER.warning("OnOff callback error", exc_info=True)
+        elif opcode == _OPCODE_LIGHT_LIGHTNESS_STATUS:
+            from tuya_ble_mesh.sig_mesh_protocol_codec import (
+                parse_light_lightness_status,
+            )
+
+            try:
+                lightness = parse_light_lightness_status(params)
+            except MalformedPacketError:
+                _LOGGER.debug("Malformed Light Lightness Status", exc_info=True)
+                return
+            _LOGGER.info(
+                "Light Lightness Status from 0x%04X: 0x%04X",
+                src,
+                lightness,
+            )
+            for callback in list(self._lightness_callbacks):
+                try:
+                    callback(lightness)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    _LOGGER.warning("Lightness callback error", exc_info=True)
+        elif opcode == _OPCODE_LIGHT_HSL_STATUS:
+            from tuya_ble_mesh.sig_mesh_protocol_codec import (
+                parse_light_hsl_status,
+            )
+
+            try:
+                hsl_l, hsl_h, hsl_s = parse_light_hsl_status(params)
+            except MalformedPacketError:
+                _LOGGER.debug("Malformed Light HSL Status", exc_info=True)
+                return
+            _LOGGER.info(
+                "Light HSL Status from 0x%04X: L=0x%04X H=0x%04X S=0x%04X",
+                src,
+                hsl_l,
+                hsl_h,
+                hsl_s,
+            )
+            for callback in list(self._hsl_callbacks):
+                try:
+                    callback(hsl_l, hsl_h, hsl_s)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    _LOGGER.warning("HSL callback error", exc_info=True)
         elif opcode == _OPCODE_COMPOSITION_STATUS:
             self._handle_composition_data(params)
         elif opcode > 0xFFFF:

@@ -42,9 +42,12 @@ from tuya_ble_mesh.sig_mesh_protocol import (
     config_model_app_bind,
     config_model_app_bind_vendor,
     encrypt_network_pdu,
+    generic_onoff_get,
     generic_onoff_set,
     light_ctl_set_unack,
+    light_hsl_get,
     light_hsl_set_unack,
+    light_lightness_get,
     light_lightness_set_unack,
     make_access_segmented,
     make_access_unsegmented,
@@ -333,6 +336,31 @@ class SIGMeshDeviceCommandsMixin:
     async def send_scene(self, _scene_id: int) -> None:
         """No-op stub: scene support not yet implemented for SIG lights."""
         _LOGGER.debug("send_scene ignored: not implemented for SIG light")
+
+    async def query_onoff(self) -> None:
+        """Fire-and-forget Generic OnOff Get.
+
+        Status replies arrive asynchronously via the registered OnOff
+        callback. Used at initial-connect time so HA learns the bulb's
+        actual power state instead of starting from the dataclass default.
+        """
+        await self.send_vendor_command(generic_onoff_get())
+
+    async def query_lightness(self) -> None:
+        """Fire-and-forget Light Lightness Get.
+
+        Status replies arrive asynchronously via the registered lightness
+        callback.
+        """
+        await self.send_vendor_command(light_lightness_get())
+
+    async def query_hsl(self) -> None:
+        """Fire-and-forget Light HSL Get.
+
+        Status replies arrive asynchronously via the registered HSL
+        callback.
+        """
+        await self.send_vendor_command(light_hsl_get())
 
     async def send_vendor_command(self, access_payload: bytes) -> None:
         """Send a Tuya vendor model command (uses AppKey encryption).

@@ -129,6 +129,8 @@ from tuya_ble_mesh.sig_mesh_protocol_codec import (  # noqa: F401  — re-export
     parse_access_opcode,
     parse_composition_data,
     parse_composition_elements,
+    parse_light_hsl_status,
+    parse_light_lightness_status,
     parse_proxy_pdu,
     parse_segment_header,
     parse_tuya_vendor_dps,

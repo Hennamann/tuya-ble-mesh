@@ -39,6 +39,8 @@ from tuya_ble_mesh.sig_mesh_protocol import (  # noqa: E402
     light_lightness_set_unack,
     make_tuya_vendor_dp_payload,
     parse_composition_elements,
+    parse_light_hsl_status,
+    parse_light_lightness_status,
     parse_tuya_vendor_frame,
 )
 
@@ -341,6 +343,76 @@ class TestParseCompositionElements:
         raw = bytes([0x00, 0x00, 0x02, 0x00, 0x00, 0x10])
         # Should stop after the header check without raising
         assert parse_composition_elements(raw) == []
+
+
+class TestLightStatusParsers:
+    def test_lightness_status_minimum(self) -> None:
+        # Present lightness only (no transition fields).
+        assert parse_light_lightness_status(bytes([0x00, 0x80])) == 0x8000
+
+    def test_lightness_status_with_transition_fields(self) -> None:
+        # Present 0x1234, target 0x5678, remaining 0x10 — ignored.
+        assert parse_light_lightness_status(bytes([0x34, 0x12, 0x78, 0x56, 0x10])) == 0x1234
+
+    def test_lightness_status_too_short(self) -> None:
+        from tuya_ble_mesh.exceptions import MalformedPacketError
+
+        with pytest.raises(MalformedPacketError):
+            parse_light_lightness_status(b"\x00")
+
+    def test_hsl_status_minimum(self) -> None:
+        # L=0x8000 H=0x0000 (red) S=0xFFFF
+        params = bytes([0x00, 0x80, 0x00, 0x00, 0xFF, 0xFF])
+        assert parse_light_hsl_status(params) == (0x8000, 0x0000, 0xFFFF)
+
+    def test_hsl_status_with_remaining_time(self) -> None:
+        # Same as above plus a trailing remaining-time byte (ignored).
+        params = bytes([0x00, 0x80, 0x00, 0x00, 0xFF, 0xFF, 0x05])
+        assert parse_light_hsl_status(params) == (0x8000, 0x0000, 0xFFFF)
+
+    def test_hsl_status_too_short(self) -> None:
+        from tuya_ble_mesh.exceptions import MalformedPacketError
+
+        with pytest.raises(MalformedPacketError):
+            parse_light_hsl_status(b"\x00\x80\x00")
+
+
+class TestQueryHelpers:
+    @pytest.mark.asyncio
+    async def test_query_onoff_emits_generic_onoff_get(self) -> None:
+        dev = _make_device()
+        captured: list[bytes] = []
+
+        async def fake_send(payload: bytes) -> None:
+            captured.append(payload)
+
+        dev.send_vendor_command = fake_send  # type: ignore[method-assign]
+        await dev.query_onoff()
+        assert captured == [bytes([0x82, 0x01])]  # OP_GENERIC_ONOFF_GET
+
+    @pytest.mark.asyncio
+    async def test_query_lightness_emits_lightness_get(self) -> None:
+        dev = _make_device()
+        captured: list[bytes] = []
+
+        async def fake_send(payload: bytes) -> None:
+            captured.append(payload)
+
+        dev.send_vendor_command = fake_send  # type: ignore[method-assign]
+        await dev.query_lightness()
+        assert captured == [bytes([0x82, 0x4B])]  # OP_LIGHT_LIGHTNESS_GET
+
+    @pytest.mark.asyncio
+    async def test_query_hsl_emits_hsl_get(self) -> None:
+        dev = _make_device()
+        captured: list[bytes] = []
+
+        async def fake_send(payload: bytes) -> None:
+            captured.append(payload)
+
+        dev.send_vendor_command = fake_send  # type: ignore[method-assign]
+        await dev.query_hsl()
+        assert captured == [bytes([0x82, 0x6D])]  # OP_LIGHT_HSL_GET
 
 
 class TestSendColorTemp:
