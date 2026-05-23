@@ -234,8 +234,8 @@ class TestSendBrightness:
 
 class TestSendColor:
     @pytest.mark.asyncio
-    async def test_red_emits_hue_saturation_then_combined_hsl(self) -> None:
-        """send_color emits three messages: Hue Set, Saturation Set, then HSL Set."""
+    async def test_red_emits_hue_sat_hsl_then_tuya_dps(self) -> None:
+        """send_color emits Hue Set, Sat Set, combined HSL Set, then Tuya DP frames."""
         dev = _make_device()
         captured: list[bytes] = []
 
@@ -244,17 +244,14 @@ class TestSendColor:
 
         dev.send_vendor_command = fake_send  # type: ignore[method-assign]
         await dev.send_color(255, 0, 0)
-        assert len(captured) == 3
-        # Message 1: Light HSL Hue Set Unacknowledged (0x8270), hue ≈ 0 (red)
-        assert captured[0][:2] == bytes([0x82, 0x70])
-        hue = int.from_bytes(captured[0][2:4], "little")
-        assert hue < 200
-        # Message 2: Light HSL Saturation Set Unacknowledged (0x8274), full saturation
-        assert captured[1][:2] == bytes([0x82, 0x74])
-        sat = int.from_bytes(captured[1][2:4], "little")
-        assert sat > 0xFFF0
-        # Message 3: combined Light HSL Set Unacknowledged (0x8277)
-        assert captured[2][:2] == bytes([0x82, 0x77])
+        # 3 SIG messages + 3 Tuya DP attempts (5, 24, 30)
+        assert len(captured) == 6
+        assert captured[0][:2] == bytes([0x82, 0x70])  # Hue Set Unack
+        assert captured[1][:2] == bytes([0x82, 0x74])  # Saturation Set Unack
+        assert captured[2][:2] == bytes([0x82, 0x77])  # combined HSL Set Unack
+        # The remaining three are Tuya vendor DP frames (opcode 0xCAD007).
+        for tuya_msg in captured[3:]:
+            assert tuya_msg[:3] == bytes([0xCA, 0xD0, 0x07])
 
 
 class TestSendLightMode:
