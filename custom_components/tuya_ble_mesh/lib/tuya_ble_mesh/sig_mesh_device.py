@@ -60,6 +60,10 @@ OnOffCallback = Callable[[bool], Any]
 VendorCallback = Callable[[int, bytes], Any]
 CompositionCallback = Callable[[CompositionData], Any]
 DisconnectCallback = Callable[[], Any]
+# Present Lightness, 0..65535.
+LightnessCallback = Callable[[int], Any]
+# (Present Lightness, Hue, Saturation) each 0..65535.
+HSLCallback = Callable[[int, int, int], Any]
 
 # BlueZ D-Bus cache settle delay after device removal (seconds)
 _BLUEZ_CACHE_CLEAR_DELAY = 2.0
@@ -186,6 +190,11 @@ class SIGMeshDevice(SIGMeshDeviceCommandsMixin, SIGMeshDeviceSegmentsMixin):  # 
         self._vendor_callbacks: list[VendorCallback] = []
         self._composition_callbacks: list[CompositionCallback] = []
         self._disconnect_callbacks: list[DisconnectCallback] = []
+        # Status callbacks for SIG Light models. Lightness gets one int
+        # (present lightness); HSL gets a (lightness, hue, saturation)
+        # tuple.
+        self._lightness_callbacks: list[LightnessCallback] = []
+        self._hsl_callbacks: list[HSLCallback] = []
 
         # Composition Data and firmware version
         self._composition: CompositionData | None = None
@@ -271,6 +280,22 @@ class SIGMeshDevice(SIGMeshDeviceCommandsMixin, SIGMeshDeviceSegmentsMixin):  # 
     def unregister_composition_callback(self, callback: CompositionCallback) -> None:
         """Remove a previously registered composition callback."""
         self._composition_callbacks.remove(callback)
+
+    def register_lightness_callback(self, callback: LightnessCallback) -> None:
+        """Register a callback for Light Lightness Status messages."""
+        self._lightness_callbacks.append(callback)
+
+    def unregister_lightness_callback(self, callback: LightnessCallback) -> None:
+        """Remove a previously registered lightness callback."""
+        self._lightness_callbacks.remove(callback)
+
+    def register_hsl_callback(self, callback: HSLCallback) -> None:
+        """Register a callback for Light HSL Status messages."""
+        self._hsl_callbacks.append(callback)
+
+    def unregister_hsl_callback(self, callback: HSLCallback) -> None:
+        """Remove a previously registered HSL callback."""
+        self._hsl_callbacks.remove(callback)
 
     def register_disconnect_callback(self, callback: DisconnectCallback) -> None:
         """Register a callback for disconnect events."""

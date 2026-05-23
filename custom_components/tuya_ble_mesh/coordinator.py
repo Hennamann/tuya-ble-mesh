@@ -87,6 +87,20 @@ def _hsv_to_rgb(h: int, s: int, v: int) -> tuple[int, int, int]:
     )
 
 
+def _sig_hsl_to_pure_rgb(hue: int, saturation: int) -> tuple[int, int, int]:
+    """Convert wire HSL (hue 0..65535 ≈ 0..360°, sat 0..65535 ≈ 0..100%) to
+    the "pure hue at full V" RGB the entity stores in ``state.red/green/blue``.
+
+    The lightness is intentionally ignored: HA's ``rgb_color`` convention is
+    that the RGB tuple represents the bulb's colour at max brightness, with
+    the V scaling carried separately in ``state.color_brightness``. So we
+    reconstruct the pure hue (V=1) from H and S only.
+    """
+    h_deg = max(0.0, min(360.0, hue / 0xFFFF * 360.0))
+    s_unit = max(0.0, min(1.0, saturation / 0xFFFF))
+    return _hsv_to_rgb(round(h_deg), round(s_unit * 1000), 1000)
+
+
 class StateUpdateSource(StrEnum):
     """Source of a device state update for confidence tracking."""
 
@@ -893,6 +907,56 @@ class TuyaBLEMeshCoordinator(DataUpdateCoordinator[None]):  # type: ignore[misc]
         self._state = replace(self._state, firmware_version=self._device.firmware_version)
         self._dispatch_update()
 
+    def _on_lightness_update(self, lightness: int) -> None:
+        """Handle a Light Lightness Status push from the bulb.
+
+        Updates the white-mode brightness on coordinator state. Lightness
+        Status is the SIG signal for "I am in white mode at level N" — so
+        a non-zero lightness implies the bulb is in white mode. We map
+        the SIG 0..65535 scale to the entity-side 1..100 range that
+        ``brightness_to_ha`` already expects.
+        """
+        # SIG → entity 1..100 scale (the Telink-side range the light
+        # entity reads from state.brightness).
+        scaled = max(0, min(100, round(lightness * 100 / 0xFFFF)))
+        updates: dict[str, Any] = {
+            "brightness": scaled,
+            "available": True,
+            "last_update_source": StateUpdateSource.NOTIFY.value,
+            "last_update_time": time.time(),
+        }
+        # Non-zero lightness → bulb is in white mode (HSL would be
+        # carrying the colour state instead).
+        if scaled > 0:
+            updates["mode"] = 0
+        self._state = replace(self._state, **updates)
+        self._dispatch_update()
+
+    def _on_hsl_update(self, lightness: int, hue: int, saturation: int) -> None:
+        """Handle a Light HSL Status push from the bulb.
+
+        Updates colour-mode state. Convert wire HSL back to RGB at full V
+        (the entity treats ``state.red/green/blue`` as the pure hue and
+        ``state.color_brightness`` as the V scaling). If saturation is
+        zero the bulb is effectively in white mode despite emitting HSL
+        Status — leave the mode bit alone in that case.
+        """
+        red, green, blue = _sig_hsl_to_pure_rgb(hue, saturation)
+        color_bright = max(0, min(255, round(lightness * 255 / 0xFFFF)))
+        updates: dict[str, Any] = {
+            "red": red,
+            "green": green,
+            "blue": blue,
+            "color_brightness": color_bright,
+            "available": True,
+            "last_update_source": StateUpdateSource.NOTIFY.value,
+            "last_update_time": time.time(),
+        }
+        if saturation > 0:
+            updates["mode"] = 1
+        self._state = replace(self._state, **updates)
+        self._dispatch_update()
+
     def _on_disconnect(self) -> None:
         """Handle disconnect event.
 
@@ -995,6 +1059,10 @@ class TuyaBLEMeshCoordinator(DataUpdateCoordinator[None]):  # type: ignore[misc]
             self._device.register_vendor_callback(self._on_vendor_update)
         if self.capabilities.has_composition_callback:
             self._device.register_composition_callback(self._on_composition_update)
+        if self.capabilities.has_lightness_callback:
+            self._device.register_lightness_callback(self._on_lightness_update)
+        if self.capabilities.has_hsl_callback:
+            self._device.register_hsl_callback(self._on_hsl_update)
         if self.capabilities.has_status_callback:
             self._device.register_status_callback(self._on_status_update)
         self._device.register_disconnect_callback(self._on_disconnect)
@@ -1007,6 +1075,27 @@ class TuyaBLEMeshCoordinator(DataUpdateCoordinator[None]):  # type: ignore[misc]
             firmware_version=self._device.firmware_version,
             last_seen=time.time(),
         )
+
+        # Pull real bulb state via SIG Get messages. Replies arrive
+        # asynchronously through the callbacks registered above and
+        # overwrite the dataclass-default zeros that HA would otherwise
+        # display until the user touches the bulb. Failures are
+        # non-fatal — we still came up connected.
+        if self.capabilities.has_onoff_callback and hasattr(self._device, "query_onoff"):
+            try:
+                await self._device.query_onoff()
+            except Exception:
+                _LOGGER.debug("Initial Generic OnOff Get failed", exc_info=True)
+        if self.capabilities.has_lightness_callback and hasattr(self._device, "query_lightness"):
+            try:
+                await self._device.query_lightness()
+            except Exception:
+                _LOGGER.debug("Initial Light Lightness Get failed", exc_info=True)
+        if self.capabilities.has_hsl_callback and hasattr(self._device, "query_hsl"):
+            try:
+                await self._device.query_hsl()
+            except Exception:
+                _LOGGER.debug("Initial Light HSL Get failed", exc_info=True)
         _LOGGER.info(
             "Initial connection succeeded for %s (%.2fs)",
             self._device.address,
@@ -1043,6 +1132,8 @@ class TuyaBLEMeshCoordinator(DataUpdateCoordinator[None]):  # type: ignore[misc]
                 ("unregister_onoff_callback", self._on_onoff_update),
                 ("unregister_vendor_callback", self._on_vendor_update),
                 ("unregister_composition_callback", self._on_composition_update),
+                ("unregister_lightness_callback", self._on_lightness_update),
+                ("unregister_hsl_callback", self._on_hsl_update),
                 ("unregister_status_callback", self._on_status_update),
             ):
                 if hasattr(self._device, attr):

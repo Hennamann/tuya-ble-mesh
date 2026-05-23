@@ -332,6 +332,51 @@ def light_lightness_get() -> bytes:
     return struct.pack(">H", OP_LIGHT_LIGHTNESS_GET)
 
 
+def parse_light_lightness_status(params: bytes) -> int:
+    """Parse a Light Lightness Status message body.
+
+    The status format is::
+
+        Present Lightness   2 bytes uint16 little-endian
+        [Target Lightness   2 bytes uint16 little-endian, optional]
+        [Remaining Time     1 byte, optional, present iff Target present]
+
+    Returns the Present Lightness (0..65535). Optional fields are ignored.
+
+    Raises:
+        MalformedPacketError: If the buffer is shorter than 2 bytes.
+    """
+    if len(params) < 2:
+        msg = f"Light Lightness Status too short: {len(params)} bytes"
+        raise MalformedPacketError(msg)
+    return struct.unpack_from("<H", params, 0)[0]
+
+
+def parse_light_hsl_status(params: bytes) -> tuple[int, int, int]:
+    """Parse a Light HSL Status message body.
+
+    The status format is::
+
+        HSL Lightness   2 bytes uint16 little-endian
+        HSL Hue         2 bytes uint16 little-endian
+        HSL Saturation  2 bytes uint16 little-endian
+        [Remaining Time 1 byte, optional]
+
+    Returns ``(lightness, hue, saturation)`` each 0..65535.
+
+    Raises:
+        MalformedPacketError: If the buffer is shorter than 6 bytes.
+    """
+    if len(params) < 6:
+        msg = f"Light HSL Status too short: {len(params)} bytes"
+        raise MalformedPacketError(msg)
+    return (
+        struct.unpack_from("<H", params, 0)[0],
+        struct.unpack_from("<H", params, 2)[0],
+        struct.unpack_from("<H", params, 4)[0],
+    )
+
+
 # ============================================================
 # Light HSL Model Messages (Mesh Model 6.5)
 # ============================================================

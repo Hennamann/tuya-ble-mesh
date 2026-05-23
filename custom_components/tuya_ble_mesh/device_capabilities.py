@@ -39,6 +39,8 @@ class DeviceCapabilities:
     has_onoff_callback: bool
     has_vendor_callback: bool
     has_composition_callback: bool
+    has_lightness_callback: bool
+    has_hsl_callback: bool
     has_sig_sequence: bool
     has_light_control: bool
     has_power_monitoring: bool
@@ -63,6 +65,8 @@ class DeviceCapabilities:
             has_onoff_callback=hasattr(device, "register_onoff_callback"),
             has_vendor_callback=hasattr(device, "register_vendor_callback"),
             has_composition_callback=hasattr(device, "register_composition_callback"),
+            has_lightness_callback=hasattr(device, "register_lightness_callback"),
+            has_hsl_callback=hasattr(device, "register_hsl_callback"),
             has_sig_sequence=hasattr(device, "set_seq") and hasattr(device, "get_seq"),
             has_light_control=hasattr(device, "send_brightness"),
             has_power_monitoring=bool(getattr(device, "supports_power_monitoring", False)),
