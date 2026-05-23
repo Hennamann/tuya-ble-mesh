@@ -117,6 +117,8 @@ from tuya_ble_mesh.sig_mesh_protocol_codec import (  # noqa: F401  — re-export
     generic_onoff_set,
     light_ctl_set_unack,
     light_hsl_get,
+    light_hsl_hue_set_unack,
+    light_hsl_saturation_set_unack,
     light_hsl_set,
     light_hsl_set_unack,
     light_lightness_get,

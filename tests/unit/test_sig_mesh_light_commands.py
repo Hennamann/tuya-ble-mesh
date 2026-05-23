@@ -234,9 +234,8 @@ class TestSendBrightness:
 
 class TestSendColor:
     @pytest.mark.asyncio
-    async def test_red_emits_hsl_set_unack(self) -> None:
-        """Sending pure red should produce a Light HSL Set Unacknowledged with
-        hue ≈ 0, saturation ≈ 0xFFFF, lightness ≈ 0xFFFF."""
+    async def test_red_emits_hue_saturation_then_combined_hsl(self) -> None:
+        """send_color emits three messages: Hue Set, Saturation Set, then HSL Set."""
         dev = _make_device()
         captured: list[bytes] = []
 
@@ -245,14 +244,17 @@ class TestSendColor:
 
         dev.send_vendor_command = fake_send  # type: ignore[method-assign]
         await dev.send_color(255, 0, 0)
-        assert len(captured) == 1
-        assert captured[0][:2] == bytes([0x82, 0x77])  # OP_LIGHT_HSL_SET_UNACK
-        lightness = int.from_bytes(captured[0][2:4], "little")
-        hue = int.from_bytes(captured[0][4:6], "little")
-        saturation = int.from_bytes(captured[0][6:8], "little")
-        assert hue < 200  # red ≈ 0°
-        assert saturation > 0xFFF0
-        assert lightness > 0xFFF0
+        assert len(captured) == 3
+        # Message 1: Light HSL Hue Set Unacknowledged (0x8270), hue ≈ 0 (red)
+        assert captured[0][:2] == bytes([0x82, 0x70])
+        hue = int.from_bytes(captured[0][2:4], "little")
+        assert hue < 200
+        # Message 2: Light HSL Saturation Set Unacknowledged (0x8274), full saturation
+        assert captured[1][:2] == bytes([0x82, 0x74])
+        sat = int.from_bytes(captured[1][2:4], "little")
+        assert sat > 0xFFF0
+        # Message 3: combined Light HSL Set Unacknowledged (0x8277)
+        assert captured[2][:2] == bytes([0x82, 0x77])
 
 
 class TestSendLightMode:
