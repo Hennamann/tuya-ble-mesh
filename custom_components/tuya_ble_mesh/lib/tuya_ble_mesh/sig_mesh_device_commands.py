@@ -44,8 +44,6 @@ from tuya_ble_mesh.sig_mesh_protocol import (
     encrypt_network_pdu,
     generic_onoff_set,
     light_ctl_set_unack,
-    light_hsl_hue_set_unack,
-    light_hsl_saturation_set_unack,
     light_hsl_set_unack,
     light_lightness_set_unack,
     make_access_segmented,
@@ -89,6 +87,47 @@ def _rgb_to_tuya_hsv(red: int, green: int, blue: int) -> tuple[int, int, int]:
         max(0, min(360, round(hue))),
         max(0, min(1000, round(sat * 1000))),
         max(0, min(1000, round(cmax * 1000))),
+    )
+
+
+def _rgb_to_sig_hsl_wire(red: int, green: int, blue: int) -> tuple[int, int, int]:
+    """Convert 0..255 RGB to SIG Mesh Light HSL wire values (H/S/L each 0..0xFFFF).
+
+    Tuya's DP layer for colour uses HSV, but the BT Mesh Light HSL Server
+    needs HSL on the wire. Sending HSV values into the HSL fields makes the
+    bulb interpret a fully-bright colour as white (because L=100% in HSL is
+    white regardless of hue) — that's the whitish-blue we were getting.
+
+    Standard HSV→HSL: L = V·(1 - S/2); S_HSL = (V - L) / min(L, 1 - L).
+    """
+    r = max(0, min(int(red), 255)) / 255.0
+    g = max(0, min(int(green), 255)) / 255.0
+    b = max(0, min(int(blue), 255)) / 255.0
+    cmax = max(r, g, b)
+    cmin = min(r, g, b)
+    delta = cmax - cmin
+    if delta == 0:
+        hue_deg = 0.0
+    elif cmax == r:
+        hue_deg = 60.0 * (((g - b) / delta) % 6.0)
+    elif cmax == g:
+        hue_deg = 60.0 * (((b - r) / delta) + 2.0)
+    else:
+        hue_deg = 60.0 * (((r - g) / delta) + 4.0)
+
+    s_hsv = 0.0 if cmax == 0 else delta / cmax
+    v = cmax
+    lightness = v * (1.0 - s_hsv / 2.0)
+    s_hsl = (
+        0.0
+        if lightness in (0.0, 1.0)
+        else (v - lightness) / min(lightness, 1.0 - lightness)
+    )
+
+    return (
+        max(0, min(0xFFFF, round(hue_deg * 0xFFFF / 360.0))),
+        max(0, min(0xFFFF, round(s_hsl * 0xFFFF))),
+        max(0, min(0xFFFF, round(lightness * 0xFFFF))),
     )
 
 
@@ -240,27 +279,21 @@ class SIGMeshDeviceCommandsMixin:
         await self.send_vendor_command(payload)
 
     async def send_color(self, red: int, green: int, blue: int) -> None:
-        """Send RGB colour via SIG Light HSL messages.
+        """Send RGB colour via SIG Light HSL Set Unacknowledged.
 
-        Tuya DP 5 (colour_data) attempts in STRING 12-char ASCII hex and
-        RAW 6-byte big-endian were both ignored by this product even
-        though the Tuya vendor model 0x07D0:0x0004 is bound to AppKey 0.
-        Until a BLE sniffer capture from the Smart Life app reveals the
-        actual wire format the firmware accepts, we drive colour entirely
-        through the standard SIG Mesh Light HSL model. The bulb's HSL
-        Server applies the lightness component and triggers entry into
-        colour mode but apparently ignores the hue/saturation — known
-        limitation that will be revisited once we have ground-truth bytes.
+        Per Tuya's Bluetooth Mesh DP control spec, colour is driven through
+        the standard SIG Mesh Light HSL Server — not through a Tuya vendor
+        DP. The spec also notes that "the Bluetooth mesh specification
+        requires the use of the HSL model, while Tuya's DP model uses the
+        HSV model. Model conversion is needed." Sending HSV values directly
+        into the HSL fields makes the bulb interpret a fully-bright colour
+        as white, which is what we were seeing.
 
-        Emits three messages:
-          1. Light HSL Hue Set Unacknowledged (0x8270).
-          2. Light HSL Saturation Set Unacknowledged (0x8274).
-          3. Light HSL Set Unacknowledged (0x8277) — combined.
+        The conversion is done by ``_rgb_to_sig_hsl_wire``: for a fully
+        saturated colour, L lands at 0x8000 (50%) where the SIG HSL Server
+        renders the pure hue.
         """
-        h_deg, s_per_1000, v_per_1000 = _rgb_to_tuya_hsv(red, green, blue)
-        hue = max(0, min(0xFFFF, round(h_deg * 0xFFFF / 360)))
-        saturation = max(0, min(0xFFFF, round(s_per_1000 * 0xFFFF / 1000)))
-        lightness = max(0, min(0xFFFF, round(v_per_1000 * 0xFFFF / 1000)))
+        hue, saturation, lightness = _rgb_to_sig_hsl_wire(red, green, blue)
 
         _LOGGER.debug(
             "send_color RGB=(%d,%d,%d) -> SIG HSL H=0x%04X S=0x%04X L=0x%04X",
@@ -271,14 +304,6 @@ class SIGMeshDeviceCommandsMixin:
             saturation,
             lightness,
         )
-
-        payload = light_hsl_hue_set_unack(hue, self._tid)
-        self._tid = (self._tid + 1) & 0xFF
-        await self.send_vendor_command(payload)
-
-        payload = light_hsl_saturation_set_unack(saturation, self._tid)
-        self._tid = (self._tid + 1) & 0xFF
-        await self.send_vendor_command(payload)
 
         payload = light_hsl_set_unack(lightness, hue, saturation, self._tid)
         self._tid = (self._tid + 1) & 0xFF

@@ -12,33 +12,41 @@ that advertise the Tuya vendor model alongside the standard SIG Light Models
 | Pairing / provisioning | PB‑GATT, key derivation, AppKey Add, Model App Bind for GenericOnOff Server (`0x1000`), Light Lightness/CTL/HSL Servers (`0x1300`/`0x1303`/`0x1307`), HSL Hue/Saturation Servers (`0x130A`/`0x130B`), and every vendor model the bulb reports in Composition Data Page 0 | Composition Data is parsed and the discovered model list drives the bind step, falling back to a hard-coded Tuya vendor model id list if comp-data is unavailable |
 | On / off | SIG Generic OnOff Set Unacknowledged (`0x8202`) | ✅ |
 | Brightness | SIG Light Lightness Set Unacknowledged (`0x824D`) | ✅ |
+| Colour | SIG Light HSL Set Unacknowledged (`0x8277`) with proper HSV→HSL conversion (`L = V·(1 - S/2)`). Per Tuya's BT Mesh DP control spec: *"The Bluetooth mesh specification requires the use of the HSL model, while Tuya's DP model uses the HSV model. Model conversion is needed."* | ✅ |
 | Initial state sync | Composition Data on connect populates `firmware_version`. GenericOnOff Status pushed by the bulb updates `is_on` | After HA restart, the bulb's initial on/off state isn't queried — pressing the device's identify button or toggling power once syncs state |
 
 ## What's partial
 
 | Function | Behaviour | Cause |
 |---|---|---|
-| Colour | Picking a colour sends Light HSL Hue Set Unack (`0x8270`), Saturation Set Unack (`0x8274`), then combined HSL Set Unack (`0x8277`). The bulb enters colour mode and applies the *lightness* component, but appears to ignore the hue and saturation — produces a whitish-blue regardless of requested RGB | The bulb's HSL Server is advertised in Composition Data but does not act on hue/saturation in practice. The same bulb is controllable by Smart Life over BLE, so the firmware *can* drive colour — just through a path we have not identified |
-| Brightness in colour mode | A brightness change while in colour mode flips the bulb back to white mode | Light Lightness Set is the SIG signal for "white mode at brightness N". Tuya DP 3 (`bright_value`) was tested as a mode-preserving alternative but produced no response on this product |
+| Brightness in colour mode | A brightness change while in colour mode flips the bulb back to white mode | Light Lightness Set is the SIG signal for "white mode at brightness N". To stay in colour mode the entity would need to send another HSL Set with current H/S and the new L — needs coordinator-side state tracking of last colour. Worth doing but not blocking |
 | Colour temperature | `send_color_temp` emits Light CTL Set Unack (`0x825F`). Untested against this product (Smart Life UI does not expose CT for this RGBW bulb) | The bulb has CTL models in Composition Data but Smart Life hides the slider — may or may not work |
 
-## What was tried and ruled out
+## How colour was resolved
 
-- **SIG Light HSL** in three variants (Hue Set / Saturation Set / combined HSL Set). Wire bytes verified byte-perfect against the spec. Bulb enters colour mode but does not apply hue or saturation.
-- **Tuya vendor DP frames** to model `0x07D0:0x0004` (bound), in every combination of DP id / type / value format I could think of:
-  - DP ids: 5, 24, 30 (the standard Tuya `dj` colour_data DP ids across v1 and v2 schemas)
-  - DP types: `BOOL`, `ENUM`, `STRING`, `RAW`, `VALUE`
-  - Wire encodings: 12-char ASCII hex `HHHHSSSSVVVV`, 6-char ASCII hex `HHSSVV`, 6-byte raw big-endian, 6-byte raw little-endian
-  - Prefixed by `switch_led=true` (DP 1), `work_mode=colour` as ENUM and as STRING (DP 2)
-  - None changed the bulb's behaviour. The vendor model is bound but evidently does not handle the standard Tuya BLE Mesh DP frame format on this product.
+For most of this PR's history, picking a colour produced a whitish-blue regardless
+of requested RGB. The root cause was an HSV/HSL confusion: Tuya's developer-facing
+API expresses colour in HSV (H 0-360, S 0-100%, V 0-100%) — what `_rgb_to_tuya_hsv`
+produces — but the standard SIG Mesh `Light HSL Set` message expects HSL on the
+wire. Sending HSV's V directly into the HSL `L` field made the bulb interpret a
+fully-bright pure colour (V=100%) as white (since HSL L=100% is white regardless
+of hue), with a tint from the H field — exactly the whitish-blue symptom.
 
-## How to confirm the right wire format
+`_rgb_to_sig_hsl_wire` does the standard HSV→HSL conversion: `L = V·(1 - S/2)`
+and `S_HSL = (V - L) / min(L, 1 - L)`. For a fully-saturated colour V=1.0, S=1.0
+this gives L=0.5 (0x8000 on the wire) — and at L=50% the SIG HSL Server renders
+the pure hue.
 
-We need either:
+Tuya's own [BT Mesh data control spec](https://developer.tuya.com/en/docs/iot-device-dev/bluetooth_software_map_mesh_data_control)
+states this explicitly: *"The Bluetooth mesh specification requires the use of the
+HSL model, while Tuya's DP model uses the HSV model. Model conversion is needed."*
 
-1. **Tuya's NetKey for this bulb.** Smart Life on iOS holds it in the app sandbox; not extractable without a jailbreak. iPhone HCI snoop of Smart Life→bulb traffic is fully visible at the network layer (NID, packet size, GATT handle) but encrypted+obfuscated at the access layer — useful for confirming packet sizes match SIG HSL Set (they do) but not for revealing the right opcode/payload.
-2. **A firmware dump of the bulb** (Telink chip, JTAG/UART) — would expose the message handler registrations and reveal which models actually act on which opcodes.
-3. **A working reference implementation** for the same product family. If you have one and find this integration, please open an issue with the wire bytes from a known-good colour change — fixing `send_color` would be a one-commit change.
+The bulb's Tuya vendor model (`0x07D0:0x0004`) is bound to AppKey 0 at provisioning
+time but is not used for primary lighting control on this product. Earlier
+iterations of this PR tried sending colour via Tuya DP 5 in several wire formats
+(STRING 12-char ASCII hex, STRING 6-char, RAW 6-byte BE/LE, with switch_led and
+work_mode prefixes); none changed the bulb's behaviour. Colour goes through SIG
+HSL only on this product family.
 
 ## File map
 
