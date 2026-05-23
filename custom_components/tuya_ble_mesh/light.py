@@ -18,6 +18,7 @@ from homeassistant.components.light import (
     ATTR_COLOR_TEMP_KELVIN,
     ATTR_RGB_COLOR,
     ATTR_TRANSITION,
+    ATTR_WHITE,
     ColorMode,
     LightEntity,
     LightEntityFeature,
@@ -311,14 +312,16 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
 
     @property
     def color_temp_kelvin(self) -> int | None:
-        """Return the current color temperature in kelvin."""
+        """Return the current color temperature in kelvin.
+
+        Not exposed on SIG bulbs: Light CTL Server is advertised in the
+        composition data but field-tested as inert on the Tuya RGBW
+        product family this code targets. See SIG_MESH_LIGHT_STATUS.md.
+        """
+        if self._sig_mesh:
+            return None
         if not self.coordinator.state.is_on:
             return None
-        if self._sig_mesh:
-            # SIG path stores kelvin directly in state.color_temp (the field
-            # is reused; for Telink it carries the device's 0..127 scale).
-            ct = self.coordinator.state.color_temp
-            return ct or None
         mired = color_temp_to_ha(self.coordinator.state.color_temp)
         return round(1_000_000 / mired)
 
@@ -338,6 +341,11 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
     @property
     def color_mode(self) -> ColorMode:
         """Return the current color mode."""
+        if self._sig_mesh:
+            # SIG bulb: only RGB and WHITE are real (CT was field-tested
+            # against this product family and the bulb's Light CTL Server
+            # is advertised but inert).
+            return ColorMode.RGB if self.coordinator.state.mode == 1 else ColorMode.WHITE
         if self.coordinator.state.mode == 1:
             return ColorMode.RGB
         return ColorMode.COLOR_TEMP
@@ -345,11 +353,11 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
     @property
     def supported_color_modes(self) -> set[ColorMode]:
         """Return supported color modes."""
-        # The SIG bulb advertises Light CTL Server in composition data, so
-        # we expose colour temperature too. Smart Life hides the CT slider
-        # for some RGBW products but the firmware can still respond to
-        # Light CTL Set; if your bulb ignores it, work in RGB mode and the
-        # CT slider just won't drive anything.
+        if self._sig_mesh:
+            # Adding WHITE here surfaces a "White" toggle next to the
+            # colour picker in HA's UI, giving the user a way to exit
+            # colour mode without picking a colour.
+            return {ColorMode.RGB, ColorMode.WHITE}
         return {ColorMode.COLOR_TEMP, ColorMode.RGB}
 
     @property
@@ -411,6 +419,15 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
         color_temp_kelvin: int | None = kwargs.get(ATTR_COLOR_TEMP_KELVIN)
         color_temp = round(1_000_000 / color_temp_kelvin) if color_temp_kelvin else None
         rgb_color: tuple[int, int, int] | None = kwargs.get(ATTR_RGB_COLOR)
+        # HA fires ATTR_WHITE when the user taps the "White" toggle on a
+        # bulb that supports ColorMode.WHITE. The value is the brightness
+        # at which to enter white mode. For SIG bulbs this is the user's
+        # explicit way back out of colour mode — Light Lightness Set is
+        # the SIG signal for "white mode at brightness N".
+        white_brightness: int | None = kwargs.get(ATTR_WHITE)
+        if white_brightness is not None and brightness is None:
+            brightness = white_brightness
+        force_white = white_brightness is not None
         has_target = brightness is not None or color_temp is not None or rgb_color is not None
 
         if transition is not None and transition > 0 and has_target:
@@ -425,7 +442,9 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
         # Debounce: schedule command after short window so rapid slider
         # moves cancel the previous pending command and only the latest fires.
         self._pending_command_task = asyncio.create_task(
-            self._debounced_send_turn_on(brightness, color_temp, rgb_color, has_target)
+            self._debounced_send_turn_on(
+                brightness, color_temp, rgb_color, has_target, force_white=force_white
+            )
         )
         self._pending_command_task.add_done_callback(
             lambda t: t.exception() if not t.cancelled() else None
@@ -437,6 +456,8 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
         color_temp: int | None,
         rgb_color: tuple[int, int, int] | None,
         has_target: bool,
+        *,
+        force_white: bool = False,
     ) -> None:
         """Send turn-on command after debounce interval.
 
@@ -521,13 +542,20 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
                     )
 
             if brightness is not None:
-                if self.coordinator.state.mode == 1:
+                # force_white = user tapped the "White" toggle. For SIG bulbs
+                # this is the explicit way out of colour mode — Light
+                # Lightness Set carries both the new brightness and the
+                # implicit mode switch.
+                staying_in_color = (
+                    not force_white and self.coordinator.state.mode == 1
+                )
+                if staying_in_color:
                     if self._sig_mesh:
                         # Stay in colour mode: re-send Light HSL Set with the
                         # current pure hue scaled to the new brightness. SIG
                         # Light Lightness Set would flip the bulb to white
                         # mode (it's the SIG "white mode at brightness N"
-                        # signal), which is the bug we're fixing here.
+                        # signal), which we deliberately avoid here.
                         state = self.coordinator.state
                         scale = max(1, brightness) / 255
                         await device.send_color(
@@ -548,10 +576,13 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
                     device_brightness = brightness_to_device(brightness)
                     await device.send_brightness(device_brightness)
                     self.coordinator.set_light_state(
-                        is_on=True, brightness=device_brightness
+                        is_on=True, mode=0, brightness=device_brightness
                     )
                     _LOGGER.debug(
-                        "Set brightness: HA %d -> device %d", brightness, device_brightness
+                        "Set brightness: HA %d -> device %d (white mode%s)",
+                        brightness,
+                        device_brightness,
+                        ", forced" if force_white else "",
                     )
 
             if not has_target:
