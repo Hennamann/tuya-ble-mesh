@@ -270,12 +270,12 @@ class SIGMeshDeviceCommandsMixin:
         """Send brightness in colour mode via Tuya DP 3.
 
         SIG Light Lightness Set forces the bulb back to white mode, so we
-        write the Tuya v1 bright_value DP instead — that preserves the
-        current work_mode.
+        write the Tuya bright_value DP instead — that preserves the
+        current work_mode. Cloud API spec for this bulb shows DP 3 ranges
+        1..1000, not the v1 25..255.
         """
         clamped = max(0, min(int(level), 255))
-        # Tuya v1 bright_value range is 25..255 (DP 3 on this product family).
-        wire = max(25, min(255, round(25 + (clamped / 255) * (255 - 25))))
+        wire = max(10, min(1000, round(10 + (clamped / 255) * (1000 - 10))))
         payload = make_tuya_vendor_dp_payload(
             TUYA_VENDOR_WRITE_UNACK,
             [TuyaVendorDP(_DP_ID_BRIGHTNESS, DP_TYPE_VALUE, wire.to_bytes(4, "big", signed=True))],
@@ -318,15 +318,21 @@ class SIGMeshDeviceCommandsMixin:
             lightness,
         )
 
-        # 1. Tuya work_mode = colour
-        try:
-            payload = make_tuya_vendor_dp_payload(
-                TUYA_VENDOR_WRITE_UNACK,
-                [TuyaVendorDP(_DP_ID_WORK_MODE, DP_TYPE_ENUM, b"\x01")],
-            )
-            await self.send_vendor_command(payload)
-        except Exception:
-            _LOGGER.debug("Tuya work_mode DP send raised", exc_info=True)
+        # 1. Tuya work_mode = colour — try both ENUM and STRING types since
+        #    the cloud spec for this bulb shows the value as the string
+        #    "colour" rather than an enum index.
+        for dp_type, value in (
+            (DP_TYPE_ENUM, b"\x01"),
+            (DP_TYPE_STRING, b"colour"),
+        ):
+            try:
+                payload = make_tuya_vendor_dp_payload(
+                    TUYA_VENDOR_WRITE_UNACK,
+                    [TuyaVendorDP(_DP_ID_WORK_MODE, dp_type, value)],
+                )
+                await self.send_vendor_command(payload)
+            except Exception:
+                _LOGGER.debug("Tuya work_mode DP send raised", exc_info=True)
 
         # 2-4. SIG HSL path — Hue, Saturation, combined HSL Set
         payload = light_hsl_hue_set_unack(hue, self._tid)
@@ -341,31 +347,39 @@ class SIGMeshDeviceCommandsMixin:
         self._tid = (self._tid + 1) & 0xFF
         await self.send_vendor_command(payload)
 
-        # 5. Tuya colour_data DP 5 as RAW 6 bytes big-endian
-        raw_color = (
+        # 5+. Tuya colour_data DP 5 — try multiple wire formats since the
+        # cloud high-level value "red" gives us no hint at the wire byte
+        # layout. Whichever the bulb implements wins.
+        raw_be = (
             h_deg.to_bytes(2, "big")
             + s_per_1000.to_bytes(2, "big")
             + v_per_1000.to_bytes(2, "big")
         )
-        try:
-            payload = make_tuya_vendor_dp_payload(
-                TUYA_VENDOR_WRITE_UNACK,
-                [TuyaVendorDP(_DP_ID_COLOUR, DP_TYPE_RAW, raw_color)],
-            )
-            await self.send_vendor_command(payload)
-        except Exception:
-            _LOGGER.debug("Tuya colour DP RAW send raised", exc_info=True)
-
-        # 6. Tuya colour_data DP 5 as STRING 12 ASCII hex chars
-        hsv_string = f"{h_deg:04x}{s_per_1000:04x}{v_per_1000:04x}".encode("ascii")
-        try:
-            payload = make_tuya_vendor_dp_payload(
-                TUYA_VENDOR_WRITE_UNACK,
-                [TuyaVendorDP(_DP_ID_COLOUR, DP_TYPE_STRING, hsv_string)],
-            )
-            await self.send_vendor_command(payload)
-        except Exception:
-            _LOGGER.debug("Tuya colour DP STRING send raised", exc_info=True)
+        raw_le = (
+            h_deg.to_bytes(2, "little")
+            + s_per_1000.to_bytes(2, "little")
+            + v_per_1000.to_bytes(2, "little")
+        )
+        str12 = f"{h_deg:04x}{s_per_1000:04x}{v_per_1000:04x}".encode("ascii")
+        # 6-char form: H 0..255, S 0..255, V 0..255 (legacy compact form)
+        h8 = max(0, min(0xFF, round(h_deg * 0xFF / 360)))
+        s8 = max(0, min(0xFF, round(s_per_1000 * 0xFF / 1000)))
+        v8 = max(0, min(0xFF, round(v_per_1000 * 0xFF / 1000)))
+        str6 = f"{h8:02x}{s8:02x}{v8:02x}".encode("ascii")
+        for label, dp_type, value in (
+            ("RAW BE", DP_TYPE_RAW, raw_be),
+            ("RAW LE", DP_TYPE_RAW, raw_le),
+            ("STRING 12", DP_TYPE_STRING, str12),
+            ("STRING 6", DP_TYPE_STRING, str6),
+        ):
+            try:
+                payload = make_tuya_vendor_dp_payload(
+                    TUYA_VENDOR_WRITE_UNACK,
+                    [TuyaVendorDP(_DP_ID_COLOUR, dp_type, value)],
+                )
+                await self.send_vendor_command(payload)
+            except Exception:
+                _LOGGER.debug("Tuya colour DP %s send raised", label, exc_info=True)
 
     async def send_light_mode(self, mode: int) -> None:
         """Mode switching is implicit in SIG Mesh: writing HSL puts the bulb
