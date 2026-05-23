@@ -456,11 +456,18 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
             if rgb_color is not None:
                 await device.send_color(rgb_color[0], rgb_color[1], rgb_color[2])
                 await device.send_light_mode(1)
-                self.coordinator.set_light_state(is_on=True, mode=1, rgb=rgb_color)
+                # Preserve current colour brightness if HA didn't supply a new
+                # one — otherwise the entity's brightness property returns 0
+                # for the freshly-entered colour mode and the slider snaps
+                # to its minimum after every colour change.
+                current_color_bright = self.coordinator.state.color_brightness or 255
+                color_bright = brightness if brightness is not None else current_color_bright
+                self.coordinator.set_light_state(
+                    is_on=True, mode=1, rgb=rgb_color, color_brightness=color_bright
+                )
                 _LOGGER.debug("Set RGB color: (%d,%d,%d)", *rgb_color)
                 if brightness is not None:
                     await device.send_color_brightness(brightness)
-                    self.coordinator.set_light_state(color_brightness=brightness)
                     _LOGGER.debug("Set color brightness: %d", brightness)
                 return
 

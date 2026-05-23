@@ -37,6 +37,7 @@ from tuya_ble_mesh.sig_mesh_device_segments import (
 from tuya_ble_mesh.sig_mesh_protocol import (
     DP_TYPE_BOOL,
     DP_TYPE_ENUM,
+    DP_TYPE_RAW,
     DP_TYPE_STRING,
     DP_TYPE_VALUE,
     MAX_UNSEG_ACCESS_PAYLOAD,
@@ -75,12 +76,11 @@ _DEFAULT_TTL = 5
 _BLE_WRITE_RETRY_INITIAL_BACKOFF = 1.0
 _BLE_WRITE_RETRY_BACKOFF_MULTIPLIER = 2.0
 
-# Tuya BLE Mesh DP ids commonly used for colour data on dj-category lights.
-# Different products allocate different ids; we send to each in turn during
-# send_color and the bulb's vendor model handler picks up whichever id it
-# implements. Failures inside this list are logged at DEBUG and do not
-# abort the send.
-_DP_TRIAL_COLOUR_DPS: tuple[int, ...] = (5, 24, 30)
+# Tuya BLE Mesh DP ids for dj-category lights (work_mode + colour_data).
+# Different products may use other ids; tweak here if a future device needs
+# a different mapping.
+_DP_ID_WORK_MODE = 2
+_DP_ID_COLOUR = 5
 
 
 def _rgb_to_tuya_hsv(red: int, green: int, blue: int) -> tuple[int, int, int]:
@@ -274,18 +274,21 @@ class SIGMeshDeviceCommandsMixin:
         await self.send_vendor_command(payload)
 
     async def send_color(self, red: int, green: int, blue: int) -> None:
-        """Send RGB colour as both standard SIG HSL messages and a Tuya vendor
-        DP frame.
+        """Send RGB colour via every plausible path on a Tuya BLE Mesh light.
 
-        Some Tuya BLE Mesh light products advertise Light HSL Server (0x1307)
-        in composition data but the HSL model is not actually functional —
-        colour control happens through the Tuya vendor model (0x07D0:0x0004)
-        using a 12-char ASCII hex colour_data DP. We emit both paths so
-        whichever one the bulb honours produces the right colour.
+        Emits, in order:
+          1. Tuya DP 2 work_mode = colour (enum=1) — switches the bulb to
+             colour mode so subsequent colour writes take effect.
+          2. SIG Light HSL Hue Set Unack (0x8270).
+          3. SIG Light HSL Saturation Set Unack (0x8274).
+          4. SIG Light HSL Set Unack (0x8277) — combined.
+          5. Tuya DP 5 colour_data as RAW 6 bytes (hue 2B BE, sat 2B BE,
+             val 2B BE) — most common Tuya BLE Mesh dj-category encoding.
+          6. Tuya DP 5 colour_data as STRING 12 ASCII hex chars — alternate
+             encoding used by some products.
 
-        RGB is converted to HSV, then mapped to:
-          - SIG Mesh 16-bit HSL (H 0..65535 → 0..360°, S/L 0..65535 → 0..100%)
-          - Tuya colour_data string "HHHHSSSSVVVV" (H 0..360, S/V 0..1000)
+        Whichever format the bulb understands wins; the others are silently
+        discarded by the vendor model handler.
         """
         h_deg, s_per_1000, v_per_1000 = _rgb_to_tuya_hsv(red, green, blue)
         hue = max(0, min(0xFFFF, round(h_deg * 0xFFFF / 360)))
@@ -293,20 +296,30 @@ class SIGMeshDeviceCommandsMixin:
         lightness = max(0, min(0xFFFF, round(v_per_1000 * 0xFFFF / 1000)))
 
         _LOGGER.warning(
-            "send_color RGB=(%d,%d,%d) -> H=%d (0x%04X / %d°) S=%d (0x%04X) L=%d (0x%04X)",
+            "send_color RGB=(%d,%d,%d) -> H=%d° S=%d/1000 V=%d/1000 "
+            "(SIG H=0x%04X S=0x%04X L=0x%04X)",
             red,
             green,
             blue,
-            hue,
-            hue,
             h_deg,
+            s_per_1000,
+            v_per_1000,
+            hue,
             saturation,
-            saturation,
-            lightness,
             lightness,
         )
 
-        # 1. SIG HSL path — Hue, Saturation, then combined HSL Set
+        # 1. Tuya work_mode = colour
+        try:
+            payload = make_tuya_vendor_dp_payload(
+                TUYA_VENDOR_WRITE_UNACK,
+                [TuyaVendorDP(_DP_ID_WORK_MODE, DP_TYPE_ENUM, b"\x01")],
+            )
+            await self.send_vendor_command(payload)
+        except Exception:
+            _LOGGER.debug("Tuya work_mode DP send raised", exc_info=True)
+
+        # 2-4. SIG HSL path — Hue, Saturation, combined HSL Set
         payload = light_hsl_hue_set_unack(hue, self._tid)
         self._tid = (self._tid + 1) & 0xFF
         await self.send_vendor_command(payload)
@@ -319,20 +332,31 @@ class SIGMeshDeviceCommandsMixin:
         self._tid = (self._tid + 1) & 0xFF
         await self.send_vendor_command(payload)
 
-        # 2. Tuya vendor DP path — colour_data as 12-char ASCII hex HSV
-        # string. DP id 5 is the most common id for Tuya BLE Mesh dj-category
-        # lights. If your product uses a different id, change DP_TRIAL_COLOUR_DPS
-        # below.
-        hsv_string = f"{h_deg:04x}{s_per_1000:04x}{v_per_1000:04x}".encode("ascii")
-        for dp_id in _DP_TRIAL_COLOUR_DPS:
+        # 5. Tuya colour_data DP 5 as RAW 6 bytes big-endian
+        raw_color = (
+            h_deg.to_bytes(2, "big")
+            + s_per_1000.to_bytes(2, "big")
+            + v_per_1000.to_bytes(2, "big")
+        )
+        try:
             payload = make_tuya_vendor_dp_payload(
                 TUYA_VENDOR_WRITE_UNACK,
-                [TuyaVendorDP(dp_id, DP_TYPE_STRING, hsv_string)],
+                [TuyaVendorDP(_DP_ID_COLOUR, DP_TYPE_RAW, raw_color)],
             )
-            try:
-                await self.send_vendor_command(payload)
-            except Exception:
-                _LOGGER.debug("Tuya colour DP %d send raised", dp_id, exc_info=True)
+            await self.send_vendor_command(payload)
+        except Exception:
+            _LOGGER.debug("Tuya colour DP RAW send raised", exc_info=True)
+
+        # 6. Tuya colour_data DP 5 as STRING 12 ASCII hex chars
+        hsv_string = f"{h_deg:04x}{s_per_1000:04x}{v_per_1000:04x}".encode("ascii")
+        try:
+            payload = make_tuya_vendor_dp_payload(
+                TUYA_VENDOR_WRITE_UNACK,
+                [TuyaVendorDP(_DP_ID_COLOUR, DP_TYPE_STRING, hsv_string)],
+            )
+            await self.send_vendor_command(payload)
+        except Exception:
+            _LOGGER.debug("Tuya colour DP STRING send raised", exc_info=True)
 
     async def send_light_mode(self, mode: int) -> None:
         """Mode switching is implicit in SIG Mesh: writing HSL puts the bulb
@@ -452,7 +476,7 @@ class SIGMeshDeviceCommandsMixin:
         proxy_pdu = make_proxy_pdu(network_pdu)
         await self._client.write_gatt_char(SIG_MESH_PROXY_DATA_IN, proxy_pdu, response=False)
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "App message sent to 0x%04X (seq=%d, %d bytes, access_payload=%s)",
             self._target_addr,
             seq,
