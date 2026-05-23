@@ -202,7 +202,7 @@ async def run_provision(hass: Any, mac: str) -> tuple[str, str, str]:
         # Bind any SIG Light models the bulb advertises. These are the
         # standard Bluetooth Mesh lighting models (Lightness / CTL / HSL)
         # that this integration uses for brightness and colour.
-        sig_light_models_to_bind = (0x1300, 0x1303, 0x1307)
+        sig_light_models_to_bind = (0x1300, 0x1303, 0x1307, 0x130A, 0x130B)
         for idx, elem in enumerate(getattr(device, "_composition_elements", []) or []):
             elem_addr = _UNICAST_DEVICE_DEFAULT + idx
             for sig_model in elem.sig_model_ids:

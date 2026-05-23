@@ -83,6 +83,12 @@ OP_LIGHT_CTL_STATUS = 0x8260
 
 # --- Light HSL model opcodes (Mesh Model 6.5) ---
 OP_LIGHT_HSL_GET = 0x826D
+OP_LIGHT_HSL_HUE_SET = 0x826F
+OP_LIGHT_HSL_HUE_SET_UNACK = 0x8270
+OP_LIGHT_HSL_HUE_STATUS = 0x8271
+OP_LIGHT_HSL_SATURATION_SET = 0x8273
+OP_LIGHT_HSL_SATURATION_SET_UNACK = 0x8274
+OP_LIGHT_HSL_SATURATION_STATUS = 0x8275
 OP_LIGHT_HSL_SET = 0x8276
 OP_LIGHT_HSL_SET_UNACK = 0x8277
 OP_LIGHT_HSL_STATUS = 0x8278
@@ -363,6 +369,34 @@ def light_hsl_set(lightness: int, hue: int, saturation: int, tid: int = 0) -> by
 def light_hsl_get() -> bytes:
     """Light HSL Get (opcode 0x826D)."""
     return struct.pack(">H", OP_LIGHT_HSL_GET)
+
+
+def light_hsl_hue_set_unack(hue: int, tid: int = 0) -> bytes:
+    """Light HSL Hue Set Unacknowledged (opcode 0x8270).
+
+    Args:
+        hue: 16-bit HSL Hue (0..65535 → 0..360°).
+        tid: Transaction identifier.
+    """
+    if not 0 <= hue <= 0xFFFF:
+        msg = f"hue must be 0..65535, got {hue}"
+        raise ProtocolError(msg)
+    return struct.pack(">H", OP_LIGHT_HSL_HUE_SET_UNACK) + struct.pack("<HB", hue, tid & 0xFF)
+
+
+def light_hsl_saturation_set_unack(saturation: int, tid: int = 0) -> bytes:
+    """Light HSL Saturation Set Unacknowledged (opcode 0x8274).
+
+    Args:
+        saturation: 16-bit HSL Saturation (0..65535 → 0..100%).
+        tid: Transaction identifier.
+    """
+    if not 0 <= saturation <= 0xFFFF:
+        msg = f"saturation must be 0..65535, got {saturation}"
+        raise ProtocolError(msg)
+    return struct.pack(">H", OP_LIGHT_HSL_SATURATION_SET_UNACK) + struct.pack(
+        "<HB", saturation, tid & 0xFF
+    )
 
 
 # ============================================================

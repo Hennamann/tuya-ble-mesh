@@ -50,6 +50,8 @@ from tuya_ble_mesh.sig_mesh_protocol import (
     encrypt_network_pdu,
     generic_onoff_set,
     light_ctl_set_unack,
+    light_hsl_hue_set_unack,
+    light_hsl_saturation_set_unack,
     light_hsl_set_unack,
     light_lightness_set_unack,
     make_access_segmented,
@@ -265,15 +267,48 @@ class SIGMeshDeviceCommandsMixin:
         await self.send_vendor_command(payload)
 
     async def send_color(self, red: int, green: int, blue: int) -> None:
-        """Send RGB colour via Light HSL Set Unacknowledged.
+        """Send RGB colour as three SIG Mesh messages.
 
-        RGB is converted to HSV, then the H/S/V triple is mapped to the SIG
-        Mesh 16-bit HSL representation (H 0..65535 → 0..360°, S/L 0..65535).
+        The combined Light HSL Set Unacknowledged (0x8277) is not honored by
+        every BT Mesh light implementation. We send the three per-component
+        messages in sequence so the bulb's Hue Server, Saturation Server,
+        and Lightness Server each see their own value.
+
+        RGB is converted to HSV, then mapped to the SIG Mesh 16-bit
+        encoding (H 0..65535 → 0..360°, S/L 0..65535 → 0..100%).
         """
         h_deg, s_per_1000, v_per_1000 = _rgb_to_tuya_hsv(red, green, blue)
         hue = max(0, min(0xFFFF, round(h_deg * 0xFFFF / 360)))
         saturation = max(0, min(0xFFFF, round(s_per_1000 * 0xFFFF / 1000)))
         lightness = max(0, min(0xFFFF, round(v_per_1000 * 0xFFFF / 1000)))
+
+        _LOGGER.warning(
+            "send_color RGB=(%d,%d,%d) -> H=%d (0x%04X / %d°) S=%d (0x%04X) L=%d (0x%04X)",
+            red,
+            green,
+            blue,
+            hue,
+            hue,
+            h_deg,
+            saturation,
+            saturation,
+            lightness,
+            lightness,
+        )
+
+        # 1. Set hue
+        payload = light_hsl_hue_set_unack(hue, self._tid)
+        self._tid = (self._tid + 1) & 0xFF
+        await self.send_vendor_command(payload)
+
+        # 2. Set saturation
+        payload = light_hsl_saturation_set_unack(saturation, self._tid)
+        self._tid = (self._tid + 1) & 0xFF
+        await self.send_vendor_command(payload)
+
+        # 3. Also send the combined HSL Set as a belt-and-braces — bulbs that
+        # only implement the combined message will pick it up; those that
+        # only implement the per-component already got the values above.
         payload = light_hsl_set_unack(lightness, hue, saturation, self._tid)
         self._tid = (self._tid + 1) & 0xFF
         await self.send_vendor_command(payload)
@@ -396,12 +431,12 @@ class SIGMeshDeviceCommandsMixin:
         proxy_pdu = make_proxy_pdu(network_pdu)
         await self._client.write_gatt_char(SIG_MESH_PROXY_DATA_IN, proxy_pdu, response=False)
 
-        _LOGGER.info(
-            "Vendor command sent to 0x%04X (opcode=%s, seq=%d, %d bytes)",
+        _LOGGER.warning(
+            "App message sent to 0x%04X (seq=%d, %d bytes, access_payload=%s)",
             self._target_addr,
-            access_payload[:3].hex(),
             seq,
             len(access_payload),
+            access_payload.hex(),
         )
 
     async def request_composition_data(self) -> None:
