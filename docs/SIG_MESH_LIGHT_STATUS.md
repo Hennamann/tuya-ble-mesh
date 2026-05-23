@@ -11,16 +11,17 @@ that advertise the Tuya vendor model alongside the standard SIG Light Models
 |---|---|---|
 | Pairing / provisioning | PB‑GATT, key derivation, AppKey Add, Model App Bind for GenericOnOff Server (`0x1000`), Light Lightness/CTL/HSL Servers (`0x1300`/`0x1303`/`0x1307`), HSL Hue/Saturation Servers (`0x130A`/`0x130B`), and every vendor model the bulb reports in Composition Data Page 0 | Composition Data is parsed and the discovered model list drives the bind step, falling back to a hard-coded Tuya vendor model id list if comp-data is unavailable |
 | On / off | SIG Generic OnOff Set Unacknowledged (`0x8202`) | ✅ |
-| Brightness | SIG Light Lightness Set Unacknowledged (`0x824D`) | ✅ |
+| Brightness (white mode) | SIG Light Lightness Set Unacknowledged (`0x824D`) | ✅ |
 | Colour | SIG Light HSL Set Unacknowledged (`0x8277`) with proper HSV→HSL conversion (`L = V·(1 - S/2)`). Per Tuya's BT Mesh DP control spec: *"The Bluetooth mesh specification requires the use of the HSL model, while Tuya's DP model uses the HSV model. Model conversion is needed."* | ✅ |
+| Brightness in colour mode | Re-emits Light HSL Set with the current pure hue scaled by the new brightness — bulb dims while staying in colour mode | ✅ |
+| Exit colour mode | `ColorMode.WHITE` advertised; tapping the HA "White" toggle fires `ATTR_WHITE` → entity sends `Light Lightness Set` which carries both the brightness and the implicit mode switch back to white | ✅ |
 | Initial state sync | Composition Data on connect populates `firmware_version`. GenericOnOff Status pushed by the bulb updates `is_on` | After HA restart, the bulb's initial on/off state isn't queried — pressing the device's identify button or toggling power once syncs state |
 
-## What's partial
+## What's not supported
 
-| Function | Behaviour | Cause |
-|---|---|---|
-| Brightness in colour mode | A brightness change while in colour mode flips the bulb back to white mode | Light Lightness Set is the SIG signal for "white mode at brightness N". To stay in colour mode the entity would need to send another HSL Set with current H/S and the new L — needs coordinator-side state tracking of last colour. Worth doing but not blocking |
-| Colour temperature | `send_color_temp` emits Light CTL Set Unack (`0x825F`). Untested against this product (Smart Life UI does not expose CT for this RGBW bulb) | The bulb has CTL models in Composition Data but Smart Life hides the slider — may or may not work |
+| Function | Cause |
+|---|---|
+| Colour temperature | Bulb advertises Light CTL Server (`0x1303`) in composition data, but field testing confirmed it does not act on `Light CTL Set Unack` — the same way its HSL Server initially appeared inert before we found the HSV→HSL fix. Smart Life also hides the CT slider for this product, suggesting Tuya's product profile doesn't wire CT up on the firmware side. `ColorMode.COLOR_TEMP` is therefore not exposed for SIG bulbs. The `send_color_temp` method remains implemented (emits `Light CTL Set Unack 0x825F`) on the chance another product behaves differently |
 
 ## How colour was resolved
 
