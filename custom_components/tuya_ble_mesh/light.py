@@ -311,11 +311,14 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
 
     @property
     def color_temp_kelvin(self) -> int | None:
-        """Return the current color temperature in kelvin (None on SIG RGB-only)."""
-        if self._sig_mesh:
-            return None
+        """Return the current color temperature in kelvin."""
         if not self.coordinator.state.is_on:
             return None
+        if self._sig_mesh:
+            # SIG path stores kelvin directly in state.color_temp (the field
+            # is reused; for Telink it carries the device's 0..127 scale).
+            ct = self.coordinator.state.color_temp
+            return ct or None
         mired = color_temp_to_ha(self.coordinator.state.color_temp)
         return round(1_000_000 / mired)
 
@@ -335,8 +338,6 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
     @property
     def color_mode(self) -> ColorMode:
         """Return the current color mode."""
-        if self._sig_mesh:
-            return ColorMode.RGB
         if self.coordinator.state.mode == 1:
             return ColorMode.RGB
         return ColorMode.COLOR_TEMP
@@ -344,8 +345,11 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
     @property
     def supported_color_modes(self) -> set[ColorMode]:
         """Return supported color modes."""
-        if self._sig_mesh:
-            return {ColorMode.RGB}
+        # The SIG bulb advertises Light CTL Server in composition data, so
+        # we expose colour temperature too. Smart Life hides the CT slider
+        # for some RGBW products but the firmware can still respond to
+        # Light CTL Set; if your bulb ignores it, work in RGB mode and the
+        # CT slider just won't drive anything.
         return {ColorMode.COLOR_TEMP, ColorMode.RGB}
 
     @property
@@ -454,37 +458,91 @@ class TuyaBLEMeshLight(TuyaBLEMeshEntity, LightEntity):
             device = self.coordinator.device
 
             if rgb_color is not None:
-                await device.send_color(rgb_color[0], rgb_color[1], rgb_color[2])
-                await device.send_light_mode(1)
                 # Preserve current colour brightness if HA didn't supply a new
                 # one — otherwise the entity's brightness property returns 0
                 # for the freshly-entered colour mode and the slider snaps
                 # to its minimum after every colour change.
                 current_color_bright = self.coordinator.state.color_brightness or 255
                 color_bright = brightness if brightness is not None else current_color_bright
+                # SIG Light HSL Server applies the lightness encoded into the
+                # HSL Set message itself; to render the picked hue *at* the
+                # current brightness, scale RGB by color_bright/255 before
+                # sending. Telink follows the same RGB-then-brightness pattern
+                # but uses separate DPs for colour and colour-brightness.
+                if self._sig_mesh:
+                    scale = max(1, color_bright) / 255
+                    await device.send_color(
+                        round(rgb_color[0] * scale),
+                        round(rgb_color[1] * scale),
+                        round(rgb_color[2] * scale),
+                    )
+                else:
+                    await device.send_color(rgb_color[0], rgb_color[1], rgb_color[2])
+                    await device.send_light_mode(1)
+                # state.rgb stores the pure hue (at max V), per HA convention.
                 self.coordinator.set_light_state(
                     is_on=True, mode=1, rgb=rgb_color, color_brightness=color_bright
                 )
                 _LOGGER.debug("Set RGB color: (%d,%d,%d)", *rgb_color)
-                if brightness is not None:
+                if brightness is not None and not self._sig_mesh:
                     await device.send_color_brightness(brightness)
                     _LOGGER.debug("Set color brightness: %d", brightness)
                 return
 
             if color_temp is not None:
-                if self.coordinator.state.mode == 1:
-                    await device.send_light_mode(0)
-                    self.coordinator.set_light_state(mode=0)
-                device_temp = color_temp_to_device(color_temp)
-                await device.send_color_temp(device_temp)
-                _LOGGER.debug("Set color temp: HA %d mireds -> device %d", color_temp, device_temp)
+                if self._sig_mesh:
+                    # SIG path: pass mireds straight in (device converts to
+                    # kelvin internally for Light CTL Set). Light CTL Set
+                    # implicitly switches the bulb to white mode, so we
+                    # record that and store the kelvin we requested for
+                    # the entity's color_temp_kelvin property to surface.
+                    requested_kelvin = (
+                        round(1_000_000 / color_temp) if color_temp else 0
+                    )
+                    await device.send_color_temp(color_temp)
+                    self.coordinator.set_light_state(
+                        mode=0, color_temp=requested_kelvin
+                    )
+                    _LOGGER.debug(
+                        "Set color temp (SIG): HA %d mireds -> %d K",
+                        color_temp,
+                        requested_kelvin,
+                    )
+                else:
+                    if self.coordinator.state.mode == 1:
+                        await device.send_light_mode(0)
+                        self.coordinator.set_light_state(mode=0)
+                    device_temp = color_temp_to_device(color_temp)
+                    await device.send_color_temp(device_temp)
+                    _LOGGER.debug(
+                        "Set color temp (Telink): HA %d mireds -> device %d",
+                        color_temp,
+                        device_temp,
+                    )
 
             if brightness is not None:
                 if self.coordinator.state.mode == 1:
-                    await device.send_color_brightness(brightness)
-                    self.coordinator.set_light_state(
-                        is_on=True, color_brightness=brightness
-                    )
+                    if self._sig_mesh:
+                        # Stay in colour mode: re-send Light HSL Set with the
+                        # current pure hue scaled to the new brightness. SIG
+                        # Light Lightness Set would flip the bulb to white
+                        # mode (it's the SIG "white mode at brightness N"
+                        # signal), which is the bug we're fixing here.
+                        state = self.coordinator.state
+                        scale = max(1, brightness) / 255
+                        await device.send_color(
+                            round(state.red * scale),
+                            round(state.green * scale),
+                            round(state.blue * scale),
+                        )
+                        self.coordinator.set_light_state(
+                            is_on=True, color_brightness=brightness
+                        )
+                    else:
+                        await device.send_color_brightness(brightness)
+                        self.coordinator.set_light_state(
+                            is_on=True, color_brightness=brightness
+                        )
                     _LOGGER.debug("Set color brightness: %d", brightness)
                 else:
                     device_brightness = brightness_to_device(brightness)
