@@ -80,6 +80,7 @@ _BLE_WRITE_RETRY_BACKOFF_MULTIPLIER = 2.0
 # Different products may use other ids; tweak here if a future device needs
 # a different mapping.
 _DP_ID_WORK_MODE = 2
+_DP_ID_BRIGHTNESS = 3
 _DP_ID_COLOUR = 5
 
 
@@ -266,11 +267,19 @@ class SIGMeshDeviceCommandsMixin:
         await self.send_vendor_command(payload)
 
     async def send_color_brightness(self, level: int) -> None:
-        """Send brightness on the colour-side scale (0..255) via Light Lightness."""
+        """Send brightness in colour mode via Tuya DP 3.
+
+        SIG Light Lightness Set forces the bulb back to white mode, so we
+        write the Tuya v1 bright_value DP instead — that preserves the
+        current work_mode.
+        """
         clamped = max(0, min(int(level), 255))
-        wire = max(0, min(0xFFFF, round(clamped * 0xFFFF / 255)))
-        payload = light_lightness_set_unack(wire, self._tid)
-        self._tid = (self._tid + 1) & 0xFF
+        # Tuya v1 bright_value range is 25..255 (DP 3 on this product family).
+        wire = max(25, min(255, round(25 + (clamped / 255) * (255 - 25))))
+        payload = make_tuya_vendor_dp_payload(
+            TUYA_VENDOR_WRITE_UNACK,
+            [TuyaVendorDP(_DP_ID_BRIGHTNESS, DP_TYPE_VALUE, wire.to_bytes(4, "big", signed=True))],
+        )
         await self.send_vendor_command(payload)
 
     async def send_color(self, red: int, green: int, blue: int) -> None:
