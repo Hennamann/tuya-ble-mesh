@@ -35,15 +35,8 @@ from tuya_ble_mesh.sig_mesh_device_segments import (
     _OPCODE_MODEL_APP_STATUS,
 )
 from tuya_ble_mesh.sig_mesh_protocol import (
-    DP_TYPE_BOOL,
-    DP_TYPE_ENUM,
-    DP_TYPE_RAW,
-    DP_TYPE_STRING,
-    DP_TYPE_VALUE,
     MAX_UNSEG_ACCESS_PAYLOAD,
     SEG_DATA_SIZE,
-    TUYA_VENDOR_WRITE_UNACK,
-    TuyaVendorDP,
     config_appkey_add,
     config_composition_get,
     config_model_app_bind,
@@ -51,11 +44,13 @@ from tuya_ble_mesh.sig_mesh_protocol import (
     encrypt_network_pdu,
     generic_onoff_set,
     light_ctl_set_unack,
+    light_hsl_hue_set_unack,
+    light_hsl_saturation_set_unack,
+    light_hsl_set_unack,
     light_lightness_set_unack,
     make_access_segmented,
     make_access_unsegmented,
     make_proxy_pdu,
-    make_tuya_vendor_dp_payload,
 )
 
 if TYPE_CHECKING:
@@ -72,15 +67,6 @@ _DEFAULT_TTL = 5
 # BLE write retry backoff parameters
 _BLE_WRITE_RETRY_INITIAL_BACKOFF = 1.0
 _BLE_WRITE_RETRY_BACKOFF_MULTIPLIER = 2.0
-
-# Tuya BLE Mesh DP ids for dj-category lights (work_mode + colour_data).
-# Different products may use other ids; tweak here if a future device needs
-# a different mapping.
-_DP_ID_SWITCH_LED = 1
-_DP_ID_WORK_MODE = 2
-_DP_ID_BRIGHTNESS = 3
-_DP_ID_COLOUR = 5
-
 
 def _rgb_to_tuya_hsv(red: int, green: int, blue: int) -> tuple[int, int, int]:
     """Convert 0..255 RGB to Tuya wire HSV (H 0..360, S 0..1000, V 0..1000)."""
@@ -225,32 +211,6 @@ class SIGMeshDeviceCommandsMixin:
         msg = f"BLE write failed for {self._address} after {max_retries} attempts"
         raise MeshConnectionError(msg) from last_error
 
-    async def _send_dp(self, dp: TuyaVendorDP) -> None:
-        """Build a single-DP Tuya vendor frame and send it (WRITE_UNACK)."""
-        payload = make_tuya_vendor_dp_payload(TUYA_VENDOR_WRITE_UNACK, [dp])
-        await self.send_vendor_command(payload)
-
-    async def send_dp_bool(self, dp_id: int, value: bool) -> None:
-        """Send a Tuya bool DP."""
-        await self._send_dp(TuyaVendorDP(dp_id, DP_TYPE_BOOL, b"\x01" if value else b"\x00"))
-
-    async def send_dp_value(self, dp_id: int, value: int) -> None:
-        """Send a Tuya value DP (4-byte big-endian signed int)."""
-        await self._send_dp(
-            TuyaVendorDP(dp_id, DP_TYPE_VALUE, value.to_bytes(4, "big", signed=True))
-        )
-
-    async def send_dp_enum(self, dp_id: int, value: int) -> None:
-        """Send a Tuya enum DP (1-byte index)."""
-        if not 0 <= value <= 0xFF:
-            msg = f"enum value {value} out of range for DP {dp_id}"
-            raise SIGMeshError(msg)
-        await self._send_dp(TuyaVendorDP(dp_id, DP_TYPE_ENUM, bytes([value])))
-
-    async def send_dp_string(self, dp_id: int, value: str) -> None:
-        """Send a Tuya string DP."""
-        await self._send_dp(TuyaVendorDP(dp_id, DP_TYPE_STRING, value.encode("ascii")))
-
     async def send_brightness(self, level: int) -> None:
         """Send brightness via Light Lightness Set Unacknowledged.
 
@@ -265,73 +225,64 @@ class SIGMeshDeviceCommandsMixin:
         await self.send_vendor_command(payload)
 
     async def send_color_brightness(self, level: int) -> None:
-        """Send brightness in colour mode via Tuya DP 3.
+        """Send brightness in colour mode via SIG Light Lightness Set.
 
-        SIG Light Lightness Set forces the bulb back to white mode, so we
-        write the Tuya bright_value DP instead — that preserves the
-        current work_mode. Cloud API spec for this bulb shows DP 3 ranges
-        1..1000, not the v1 25..255.
+        Tuya DP 3 was tried as a mode-preserving alternative but produced no
+        response on this product line, so we fall back to SIG Lightness Set
+        until the right Tuya wire format for DP 3 is known. SIG Lightness
+        flips the bulb back to white mode on this firmware — an annoyance,
+        but at least brightness moves the bulb.
         """
         clamped = max(0, min(int(level), 255))
-        wire = max(10, min(1000, round(10 + (clamped / 255) * (1000 - 10))))
-        payload = make_tuya_vendor_dp_payload(
-            TUYA_VENDOR_WRITE_UNACK,
-            [TuyaVendorDP(_DP_ID_BRIGHTNESS, DP_TYPE_VALUE, wire.to_bytes(4, "big", signed=True))],
-        )
+        wire = max(0, min(0xFFFF, round(clamped * 0xFFFF / 255)))
+        payload = light_lightness_set_unack(wire, self._tid)
+        self._tid = (self._tid + 1) & 0xFF
         await self.send_vendor_command(payload)
 
     async def send_color(self, red: int, green: int, blue: int) -> None:
-        """Send RGB colour as a Tuya BLE Mesh DP sequence.
+        """Send RGB colour via SIG Light HSL messages.
 
-        The bulb's SIG Light HSL Server is advertised but non-functional on
-        this product (only SIG Light Lightness Server works). Colour is
-        driven entirely through the Tuya vendor model. Cloud API spec
-        showed the dj-category instruction set:
+        Tuya DP 5 (colour_data) attempts in STRING 12-char ASCII hex and
+        RAW 6-byte big-endian were both ignored by this product even
+        though the Tuya vendor model 0x07D0:0x0004 is bound to AppKey 0.
+        Until a BLE sniffer capture from the Smart Life app reveals the
+        actual wire format the firmware accepts, we drive colour entirely
+        through the standard SIG Mesh Light HSL model. The bulb's HSL
+        Server applies the lightness component and triggers entry into
+        colour mode but apparently ignores the hue/saturation — known
+        limitation that will be revisited once we have ground-truth bytes.
 
-          switch_led (DP 1, bool)
-          work_mode  (DP 2, enum: white=0, colour=1, scene=2, music=3)
-          colour_data (DP 5, string, "HHHHSSSSVVVV" 12-char ASCII hex
-                       where H 0..360, S 0..1000, V 0..1000)
-
-        We send DPs in the cloud's order so the bulb's state machine is
-        primed correctly. work_mode is sent twice (as ENUM and as STRING
-        "colour") since the cloud uses the string form and we don't know
-        which one this firmware parses on the wire. colour_data is also
-        sent in RAW 6-byte big-endian as a fallback for older products
-        that didn't standardise on the ASCII-hex form.
+        Emits three messages:
+          1. Light HSL Hue Set Unacknowledged (0x8270).
+          2. Light HSL Saturation Set Unacknowledged (0x8274).
+          3. Light HSL Set Unacknowledged (0x8277) — combined.
         """
         h_deg, s_per_1000, v_per_1000 = _rgb_to_tuya_hsv(red, green, blue)
-        str12 = f"{h_deg:04x}{s_per_1000:04x}{v_per_1000:04x}".encode("ascii")
-        raw_be = (
-            h_deg.to_bytes(2, "big")
-            + s_per_1000.to_bytes(2, "big")
-            + v_per_1000.to_bytes(2, "big")
-        )
+        hue = max(0, min(0xFFFF, round(h_deg * 0xFFFF / 360)))
+        saturation = max(0, min(0xFFFF, round(s_per_1000 * 0xFFFF / 1000)))
+        lightness = max(0, min(0xFFFF, round(v_per_1000 * 0xFFFF / 1000)))
 
-        _LOGGER.warning(
-            "send_color RGB=(%d,%d,%d) -> Tuya HSV H=%d° S=%d/1000 V=%d/1000 str12=%s",
+        _LOGGER.debug(
+            "send_color RGB=(%d,%d,%d) -> SIG HSL H=0x%04X S=0x%04X L=0x%04X",
             red,
             green,
             blue,
-            h_deg,
-            s_per_1000,
-            v_per_1000,
-            str12.decode("ascii"),
+            hue,
+            saturation,
+            lightness,
         )
 
-        dps_to_send: list[tuple[str, TuyaVendorDP]] = [
-            ("switch_led=true", TuyaVendorDP(_DP_ID_SWITCH_LED, DP_TYPE_BOOL, b"\x01")),
-            ("work_mode=colour ENUM", TuyaVendorDP(_DP_ID_WORK_MODE, DP_TYPE_ENUM, b"\x01")),
-            ("work_mode=colour STRING", TuyaVendorDP(_DP_ID_WORK_MODE, DP_TYPE_STRING, b"colour")),
-            ("colour_data RAW BE", TuyaVendorDP(_DP_ID_COLOUR, DP_TYPE_RAW, raw_be)),
-            ("colour_data STRING 12", TuyaVendorDP(_DP_ID_COLOUR, DP_TYPE_STRING, str12)),
-        ]
-        for label, dp in dps_to_send:
-            try:
-                payload = make_tuya_vendor_dp_payload(TUYA_VENDOR_WRITE_UNACK, [dp])
-                await self.send_vendor_command(payload)
-            except Exception:
-                _LOGGER.debug("send_color DP %s raised", label, exc_info=True)
+        payload = light_hsl_hue_set_unack(hue, self._tid)
+        self._tid = (self._tid + 1) & 0xFF
+        await self.send_vendor_command(payload)
+
+        payload = light_hsl_saturation_set_unack(saturation, self._tid)
+        self._tid = (self._tid + 1) & 0xFF
+        await self.send_vendor_command(payload)
+
+        payload = light_hsl_set_unack(lightness, hue, saturation, self._tid)
+        self._tid = (self._tid + 1) & 0xFF
+        await self.send_vendor_command(payload)
 
     async def send_light_mode(self, mode: int) -> None:
         """Mode switching is implicit in SIG Mesh: writing HSL puts the bulb
